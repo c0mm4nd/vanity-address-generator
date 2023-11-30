@@ -94,7 +94,7 @@ fn find_vanity_address(thread: usize) {
     }
 
     let re = RegexBuilder::new(args.regex.as_ref())
-        .case_insensitive(true)
+        .case_insensitive(false)
         .multi_line(false)
         .dot_matches_new_line(false)
         .ignore_whitespace(true)
