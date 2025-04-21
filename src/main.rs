@@ -5,7 +5,7 @@ use regex::RegexBuilder;
 use std::str::FromStr;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 use std::thread;
 use std::time::Instant;
@@ -121,14 +121,22 @@ fn main() {
         println!("Webhook: {}", args.webhook);
     }
 
+    // Validate that the regex matches the selected blockchain address format
+    let blockchain_type = BlockchainType::from_str(&args.chain).unwrap_or(BlockchainType::Ethereum);
+    if let Err(err) = validate_regex_for_chain(&args.regex, &blockchain_type) {
+        eprintln!("Error: {}", err);
+        eprintln!("Please modify your regex to match the {} address format", args.chain);
+        std::process::exit(1);
+    }
+
     println!("\n");
 
     // Create shared performance tracker
     let performance_tracker = Arc::new(PerformanceTracker::new());
-
+    
     // Clone tracker for worker threads
     let tracker_for_workers = Arc::clone(&performance_tracker);
-
+    
     // Create a thread to display performance statistics
     let display_handle = {
         let tracker = Arc::clone(&performance_tracker);
@@ -137,7 +145,7 @@ fn main() {
             loop {
                 thread::sleep(Duration::from_secs(1));
                 let ops_per_second = tracker.get_ops_per_second();
-
+                
                 // Clear line and move cursor to beginning
                 print!("\r\x1B[K");
                 print!("Hashrate: {:.2} addresses/s", ops_per_second);
@@ -158,7 +166,7 @@ fn main() {
     for handle in handles {
         handle.join().unwrap();
     }
-
+    
     // This is technically unnecessary as we'll never reach this point unless
     // a vanity address is found (in which case the program would exit)
     display_handle.join().unwrap();
@@ -167,7 +175,7 @@ fn main() {
 fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracker>) {
     let args = Args::parse();
     let blockchain_type = BlockchainType::from_str(&args.chain).unwrap_or(BlockchainType::Ethereum);
-
+    
     println!("Thread {} searching for {} addresses", thread, args.chain);
 
     let start = Instant::now();
@@ -365,8 +373,6 @@ fn generate_bitcoin_address(mnemonic: &Mnemonic, blockchain_type: &BlockchainTyp
             // Create the raw redeem script - OP_0 <pubKeyHash>
             let mut redeem_script = vec![0x00, 0x14];
             redeem_script.extend_from_slice(&ripemd_result);
-            let mut redeem_script = vec![0x00, 0x14];
-            redeem_script.extend_from_slice(&ripemd_result);
 
             // Calculate the hash of the redeem script
             // SHA-256
@@ -476,4 +482,93 @@ fn generate_solana_keypair(mnemonic: &Mnemonic) -> Keypair {
 fn generate_solana_address(mnemonic: &Mnemonic) -> String {
     let keypair = generate_solana_keypair(mnemonic);
     bs58::encode(&keypair.public.to_bytes()).into_string()
+}
+
+/// Validate if the regex pattern matches the specified blockchain address format
+fn validate_regex_for_chain(regex: &str, blockchain_type: &BlockchainType) -> Result<(), String> {
+    if regex.is_empty() {
+        return Err(String::from("Empty regex pattern is not allowed. Please specify a pattern to match addresses."));
+    }
+
+    match blockchain_type {
+        BlockchainType::Ethereum => {
+            // Ethereum addresses are 40 hex digits, optionally prefixed with "0x"
+            if regex.starts_with("^") {
+                let prefix_check = regex.trim_start_matches('^');
+                
+                // Check if prefix is 0x (if specified)
+                if prefix_check.starts_with("0x") {
+                    let hex_part = prefix_check.trim_start_matches("0x");
+                    
+                    // Check if the remaining part contains valid hex characters only
+                    for c in hex_part.chars() {
+                        if !c.is_ascii_hexdigit() && c != '.' && c != '*' && c != '+'
+                            && c != '?' && c != '|' && c != '[' && c != ']' && c != '(' && c != ')'
+                            && c != '{' && c != '}' && c != '\\' && c != '$' {
+                            return Err(format!(
+                                "Invalid Ethereum address regex: '{}' contains non-hexadecimal character '{}'. Ethereum addresses can only contain hex characters (0-9, a-f, A-F)",
+                                regex, c
+                            ));
+                        }
+                    }
+                }
+            }
+        },
+        BlockchainType::BitcoinP2PKH => {
+            // Validate P2PKH address format (Bitcoin addresses starting with 1)
+            if regex.starts_with("^") && !regex.starts_with("^1") && !regex.contains("|^1") {
+                return Err(format!(
+                    "Invalid Bitcoin P2PKH address regex: '{}'. P2PKH addresses must start with '1'",
+                    regex
+                ));
+            }
+        },
+        BlockchainType::BitcoinP2SH => {
+            // Validate P2SH address format (Bitcoin addresses starting with 3)
+            if regex.starts_with("^") && !regex.starts_with("^3") && !regex.contains("|^3") {
+                return Err(format!(
+                    "Invalid Bitcoin P2SH address regex: '{}'. P2SH addresses must start with '3'",
+                    regex
+                ));
+            }
+        },
+        BlockchainType::BitcoinBech32 => {
+            // Validate Bech32 address format (Bitcoin addresses starting with bc1)
+            if regex.starts_with("^") && !regex.starts_with("^bc1") && !regex.contains("|^bc1") {
+                return Err(format!(
+                    "Invalid Bitcoin Bech32 address regex: '{}'. Bech32 addresses must start with 'bc1'",
+                    regex
+                ));
+            }
+        },
+        BlockchainType::Solana => {
+            // Solana addresses are Base58-encoded 32-byte public keys
+            // Base58 charset: 123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz
+            let base58_chars = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+            for c in regex.chars() {
+                if !base58_chars.contains(c) && c != '^' && c != '$' && c != '.' && c != '*' 
+                   && c != '+' && c != '?' && c != '|' && c != '[' && c != ']' && c != '(' 
+                   && c != ')' && c != '{' && c != '}' && c != '\\' {
+                    
+                    if c == '0' || c == 'O' || c == 'I' || c == 'l' {
+                        return Err(format!(
+                            "Invalid Solana address regex: '{}' contains character '{}', which is not in Base58 charset (Note: Base58 doesn't include 0, O, I, l)",
+                            regex, c
+                        ));
+                    } else {
+                        // If not a regex special character or Base58 character, might be invalid
+                        if !c.is_whitespace() {  // Ignore whitespace
+                            return Err(format!(
+                                "Invalid Solana address regex: '{}' contains character '{}', which is not in Base58 charset",
+                                regex, c
+                            ));
+                        }
+                    }
+                }
+            }
+        },
+    }
+
+    Ok(())
 }
