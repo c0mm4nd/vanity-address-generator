@@ -6,6 +6,7 @@ use std::str::FromStr;
 use std::thread;
 use std::time::Instant;
 use std::{collections::HashMap, time::Duration};
+use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
 
 use bip0039::{Count, Mnemonic};
 use libsecp256k1::{PublicKey, SecretKey};
@@ -70,10 +71,40 @@ impl FromStr for BlockchainType {
     }
 }
 
+// Structure to track performance across threads
+struct PerformanceTracker {
+    address_counter: AtomicUsize,
+    start_time: Instant,
+}
+
+impl PerformanceTracker {
+    fn new() -> Self {
+        PerformanceTracker {
+            address_counter: AtomicUsize::new(0),
+            start_time: Instant::now(),
+        }
+    }
+
+    fn increment(&self) {
+        self.address_counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn get_ops_per_second(&self) -> f64 {
+        let count = self.address_counter.load(Ordering::Relaxed) as f64;
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            count / elapsed
+        } else {
+            0.0
+        }
+    }
+}
+
 fn main() {
     let args = Args::parse();
     println!("Threads count: {}", args.threads);
     println!("Matching regex: {}", args.regex);
+    println!("Chain: {}", args.chain);
 
     if args.words > 0 {
         println!("Mnemonic words count: {}", args.words);
@@ -83,26 +114,50 @@ fn main() {
         println!("Webhook: {}", args.webhook);
     }
 
-    if args.benchmark {
-        println!("Benchmark: true");
-    }
-
     println!("\n");
+
+    // Create shared performance tracker
+    let performance_tracker = Arc::new(PerformanceTracker::new());
+    
+    // Clone tracker for worker threads
+    let tracker_for_workers = Arc::clone(&performance_tracker);
+    
+    // Create a thread to display performance statistics
+    let display_handle = {
+        let tracker = Arc::clone(&performance_tracker);
+        thread::spawn(move || {
+            // Display hashrate every second
+            loop {
+                thread::sleep(Duration::from_secs(1));
+                let ops_per_second = tracker.get_ops_per_second();
+                
+                // Clear line and move cursor to beginning
+                print!("\r\x1B[K");
+                print!("Hashrate: {:.2} addresses/s", ops_per_second);
+                std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            }
+        })
+    };
 
     let mut handles = vec![];
 
     for i in 0..args.threads {
+        let worker_tracker = Arc::clone(&tracker_for_workers);
         handles.push(thread::spawn(move || {
-            find_vanity_address(i);
+            find_vanity_address(i, worker_tracker);
         }));
     }
 
     for handle in handles {
         handle.join().unwrap();
     }
+    
+    // This is technically unnecessary as we'll never reach this point unless
+    // a vanity address is found (in which case the program would exit)
+    display_handle.join().unwrap();
 }
 
-fn find_vanity_address(thread: usize) {
+fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracker>) {
     let args = Args::parse();
     let blockchain_type = BlockchainType::from_str(&args.chain).unwrap_or(BlockchainType::Ethereum);
     
@@ -147,6 +202,8 @@ fn find_vanity_address(thread: usize) {
                 eip55::checksum(&hex::encode(&output[(output.len() - 20)..]))
             },
             BlockchainType::Bitcoin => {
+                // suggest not using any vanity address regex for bitcoin
+                println!("Bitcoin vanity address regex is not suggested, because it is not safe that reusing the same address");
                 generate_bitcoin_address(&mnemonic)
             },
             BlockchainType::Solana => {
@@ -172,6 +229,8 @@ fn find_vanity_address(thread: usize) {
                 op_start = Instant::now();
             }
         }
+
+        performance_tracker.increment();
     }
 }
 
