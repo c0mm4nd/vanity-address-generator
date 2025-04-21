@@ -13,6 +13,15 @@ use tiny_hderive::bip32::ExtendedPrivKey;
 use tiny_hderive::bip44::ChildNumber;
 use tiny_keccak::{Hasher, Keccak};
 
+// Bitcoin related imports
+use bs58;
+use ripemd::{Digest as RipemdDigest, Ripemd160};
+use sha2::{Digest as Sha2Digest, Sha256};
+
+// Solana related imports
+use base58 as solana_base58;
+use ed25519_dalek::{Keypair, PublicKey as SolanaPublicKey, SecretKey as SolanaSecretKey};
+
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
 struct Args {
@@ -36,6 +45,29 @@ struct Args {
 
     #[clap(long, default_value_t = 0)]
     gpu_platform: i32,
+    
+    #[clap(short, long, default_value = "eth", value_parser = ["eth", "btc", "sol"])]
+    chain: String,
+}
+
+#[derive(Debug, Clone)]
+enum BlockchainType {
+    Ethereum,
+    Bitcoin,
+    Solana,
+}
+
+impl FromStr for BlockchainType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "eth" => Ok(BlockchainType::Ethereum),
+            "btc" => Ok(BlockchainType::Bitcoin),
+            "sol" => Ok(BlockchainType::Solana),
+            _ => Err(format!("Unknown blockchain type: {}", s)),
+        }
+    }
 }
 
 fn main() {
@@ -72,6 +104,9 @@ fn main() {
 
 fn find_vanity_address(thread: usize) {
     let args = Args::parse();
+    let blockchain_type = BlockchainType::from_str(&args.chain).unwrap_or(BlockchainType::Ethereum);
+    
+    println!("Thread {} searching for {} addresses", thread, args.chain);
 
     let start = Instant::now();
 
@@ -104,9 +139,20 @@ fn find_vanity_address(thread: usize) {
 
     let mut output = [0u8; 32];
     loop {
-        let (mnemonic, public_key) = generate_address(words);
-        keccak_hash(public_key, &mut output);
-        let address = eip55::checksum(&hex::encode(&output[(output.len() - 20)..]));
+        let mnemonic = Mnemonic::generate(words);
+        let address = match blockchain_type {
+            BlockchainType::Ethereum => {
+                let (_, public_key) = generate_eth_address(&mnemonic);
+                keccak_hash(public_key, &mut output);
+                eip55::checksum(&hex::encode(&output[(output.len() - 20)..]))
+            },
+            BlockchainType::Bitcoin => {
+                generate_bitcoin_address(&mnemonic)
+            },
+            BlockchainType::Solana => {
+                generate_solana_address(&mnemonic)
+            },
+        };
 
         if re.is_match(&address) {
             let duration = start.elapsed();
@@ -155,8 +201,7 @@ fn keccak_hash(public_key: PublicKey, output: &mut [u8; 32]) {
 }
 
 #[inline(always)]
-fn generate_address(words: Count) -> (Mnemonic, PublicKey) {
-    let mnemonic = Mnemonic::generate(words);
+fn generate_eth_address(mnemonic: &Mnemonic) -> (Mnemonic, PublicKey) {
     let seed = mnemonic.to_seed("");
 
     let hdwallet = ExtendedPrivKey::derive(&seed, "m/44'/60'/0'/0").unwrap();
@@ -170,5 +215,83 @@ fn generate_address(words: Count) -> (Mnemonic, PublicKey) {
 
     let public_key = PublicKey::from_secret_key(&secret_key);
 
-    (mnemonic, public_key)
+    (mnemonic.clone(), public_key)
+}
+
+#[inline(always)]
+fn generate_bitcoin_address(mnemonic: &Mnemonic) -> String {
+    let seed = mnemonic.to_seed("");
+    
+    // Bitcoin uses m/44'/0'/0'/0 derivation path (BIP44)
+    let hdwallet = ExtendedPrivKey::derive(&seed, "m/44'/0'/0'/0").unwrap();
+    let account0 = hdwallet.child(ChildNumber::from_str("0").unwrap()).unwrap();
+    
+    let secret_key = SecretKey::parse(&account0.secret()).unwrap();
+    let public_key = PublicKey::from_secret_key(&secret_key);
+    
+    // Bitcoin address generation (P2PKH)
+    let serialized_pub_key = public_key.serialize();
+    
+    // SHA-256 hash of the public key
+    let mut sha256_hasher = Sha256::new();
+    sha256_hasher.update(serialized_pub_key);
+    let sha256_result = sha256_hasher.finalize();
+    
+    // RIPEMD-160 hash of the SHA-256 hash
+    let mut ripemd_hasher = Ripemd160::new();
+    ripemd_hasher.update(sha256_result);
+    let ripemd_result = ripemd_hasher.finalize();
+    
+    // Add version byte (0x00 for Mainnet P2PKH)
+    let mut address_bytes = vec![0x00];
+    address_bytes.extend_from_slice(&ripemd_result);
+    
+    // Double SHA-256 for checksum
+    let mut checksum_hasher1 = Sha256::new();
+    checksum_hasher1.update(&address_bytes);
+    let checksum_result1 = checksum_hasher1.finalize();
+    
+    let mut checksum_hasher2 = Sha256::new();
+    checksum_hasher2.update(checksum_result1);
+    let checksum_result2 = checksum_hasher2.finalize();
+    
+    // Add first 4 bytes of the checksum
+    address_bytes.extend_from_slice(&checksum_result2[0..4]);
+    
+    // Base58 encode
+    bs58::encode(address_bytes).into_string()
+}
+
+#[inline(always)]
+fn generate_solana_keypair(mnemonic: &Mnemonic) -> Keypair {
+    let seed = mnemonic.to_seed("");
+    
+    // Solana uses m/44'/501'/0'/0' derivation path
+    let hdwallet = ExtendedPrivKey::derive(&seed, "m/44'/501'/0'/0'").unwrap();
+    let account0 = hdwallet.child(ChildNumber::from_str("0").unwrap()).unwrap();
+    
+    // Convert the seed to a Solana keypair
+    // The seed is 64 bytes, but we need 32 bytes for the Solana secret key
+    let secret = account0.secret();
+    
+    // Create a SHA-256 hash of the seed to get a 32-byte key
+    let mut hasher = Sha256::new();
+    hasher.update(secret);
+    let hashed_seed = hasher.finalize();
+    
+    let secret_key_bytes: [u8; 32] = hashed_seed.as_slice().try_into().unwrap();
+    let secret_key = SolanaSecretKey::from_bytes(&secret_key_bytes).unwrap();
+    
+    // Create a keypair from the secret key
+    let public_key = SolanaPublicKey::from(&secret_key);
+    Keypair {
+        secret: secret_key,
+        public: public_key,
+    }
+}
+
+#[inline(always)]
+fn generate_solana_address(mnemonic: &Mnemonic) -> String {
+    let keypair = generate_solana_keypair(mnemonic);
+    bs58::encode(&keypair.public.to_bytes()).into_string()
 }
