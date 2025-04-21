@@ -3,10 +3,13 @@ extern crate num_cpus;
 use clap::Parser;
 use regex::RegexBuilder;
 use std::str::FromStr;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 use std::time::Instant;
 use std::{collections::HashMap, time::Duration};
-use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
 
 use bip0039::{Count, Mnemonic};
 use libsecp256k1::{PublicKey, SecretKey};
@@ -15,12 +18,12 @@ use tiny_hderive::bip44::ChildNumber;
 use tiny_keccak::{Hasher, Keccak};
 
 // Bitcoin related imports
+use bech32::{self, ToBase32, Variant};
 use bs58;
 use ripemd::{Digest as RipemdDigest, Ripemd160};
 use sha2::{Digest as Sha2Digest, Sha256};
 
 // Solana related imports
-use base58 as solana_base58;
 use ed25519_dalek::{Keypair, PublicKey as SolanaPublicKey, SecretKey as SolanaSecretKey};
 
 #[derive(Parser, Debug)]
@@ -46,15 +49,17 @@ struct Args {
 
     #[clap(long, default_value_t = 0)]
     gpu_platform: i32,
-    
-    #[clap(short, long, default_value = "eth", value_parser = ["eth", "btc", "sol"])]
+
+    #[clap(short, long, default_value = "eth", value_parser = ["eth", "btc", "btc-p2pkh", "btc-p2sh", "btc-bech32", "sol"])]
     chain: String,
 }
 
 #[derive(Debug, Clone)]
 enum BlockchainType {
     Ethereum,
-    Bitcoin,
+    BitcoinP2PKH,  // Traditional (P2PKH) address (1...)
+    BitcoinP2SH,   // Pay-to-Script-Hash address (3...)
+    BitcoinBech32, // Segregated Witness address (bc1...)
     Solana,
 }
 
@@ -64,7 +69,9 @@ impl FromStr for BlockchainType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "eth" => Ok(BlockchainType::Ethereum),
-            "btc" => Ok(BlockchainType::Bitcoin),
+            "btc" | "btc-p2pkh" => Ok(BlockchainType::BitcoinP2PKH),
+            "btc-p2sh" => Ok(BlockchainType::BitcoinP2SH),
+            "btc-bech32" => Ok(BlockchainType::BitcoinBech32),
             "sol" => Ok(BlockchainType::Solana),
             _ => Err(format!("Unknown blockchain type: {}", s)),
         }
@@ -118,10 +125,10 @@ fn main() {
 
     // Create shared performance tracker
     let performance_tracker = Arc::new(PerformanceTracker::new());
-    
+
     // Clone tracker for worker threads
     let tracker_for_workers = Arc::clone(&performance_tracker);
-    
+
     // Create a thread to display performance statistics
     let display_handle = {
         let tracker = Arc::clone(&performance_tracker);
@@ -130,7 +137,7 @@ fn main() {
             loop {
                 thread::sleep(Duration::from_secs(1));
                 let ops_per_second = tracker.get_ops_per_second();
-                
+
                 // Clear line and move cursor to beginning
                 print!("\r\x1B[K");
                 print!("Hashrate: {:.2} addresses/s", ops_per_second);
@@ -151,7 +158,7 @@ fn main() {
     for handle in handles {
         handle.join().unwrap();
     }
-    
+
     // This is technically unnecessary as we'll never reach this point unless
     // a vanity address is found (in which case the program would exit)
     display_handle.join().unwrap();
@@ -160,7 +167,7 @@ fn main() {
 fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracker>) {
     let args = Args::parse();
     let blockchain_type = BlockchainType::from_str(&args.chain).unwrap_or(BlockchainType::Ethereum);
-    
+
     println!("Thread {} searching for {} addresses", thread, args.chain);
 
     let start = Instant::now();
@@ -200,15 +207,23 @@ fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracke
                 let (_, public_key) = generate_eth_address(&mnemonic);
                 keccak_hash(public_key, &mut output);
                 eip55::checksum(&hex::encode(&output[(output.len() - 20)..]))
-            },
-            BlockchainType::Bitcoin => {
+            }
+            BlockchainType::BitcoinP2PKH => {
                 // suggest not using any vanity address regex for bitcoin
                 println!("Bitcoin vanity address regex is not suggested, because it is not safe that reusing the same address");
-                generate_bitcoin_address(&mnemonic)
-            },
-            BlockchainType::Solana => {
-                generate_solana_address(&mnemonic)
-            },
+                generate_bitcoin_address(&mnemonic, &blockchain_type)
+            }
+            BlockchainType::BitcoinP2SH => {
+                // suggest not using any vanity address regex for bitcoin
+                println!("Bitcoin vanity address regex is not suggested, because it is not safe that reusing the same address");
+                generate_bitcoin_address(&mnemonic, &blockchain_type)
+            }
+            BlockchainType::BitcoinBech32 => {
+                // suggest not using any vanity address regex for bitcoin
+                println!("Bitcoin vanity address regex is not suggested, because it is not safe that reusing the same address");
+                generate_bitcoin_address(&mnemonic, &blockchain_type)
+            }
+            BlockchainType::Solana => generate_solana_address(&mnemonic),
         };
 
         if re.is_match(&address) {
@@ -278,69 +293,177 @@ fn generate_eth_address(mnemonic: &Mnemonic) -> (Mnemonic, PublicKey) {
 }
 
 #[inline(always)]
-fn generate_bitcoin_address(mnemonic: &Mnemonic) -> String {
+fn generate_bitcoin_address(mnemonic: &Mnemonic, blockchain_type: &BlockchainType) -> String {
     let seed = mnemonic.to_seed("");
-    
-    // Bitcoin uses m/44'/0'/0'/0 derivation path (BIP44)
-    let hdwallet = ExtendedPrivKey::derive(&seed, "m/44'/0'/0'/0").unwrap();
+
+    // Select the derivation path based on the blockchain type
+    // P2PKH: m/44'/0'/0'/0
+    // P2SH: m/49'/0'/0'/0
+    // Bech32 (Segwit): m/84'/0'/0'/0
+    let derivation_path = match blockchain_type {
+        BlockchainType::BitcoinP2PKH => "m/44'/0'/0'/0",
+        BlockchainType::BitcoinP2SH => "m/49'/0'/0'/0",
+        BlockchainType::BitcoinBech32 => "m/84'/0'/0'/0",
+        _ => "m/44'/0'/0'/0", // Default to P2PKH path
+    };
+
+    let hdwallet = ExtendedPrivKey::derive(&seed, derivation_path).unwrap();
     let account0 = hdwallet.child(ChildNumber::from_str("0").unwrap()).unwrap();
-    
+
     let secret_key = SecretKey::parse(&account0.secret()).unwrap();
     let public_key = PublicKey::from_secret_key(&secret_key);
-    
-    // Bitcoin address generation (P2PKH)
+
+    // Serialize public key
     let serialized_pub_key = public_key.serialize();
-    
-    // SHA-256 hash of the public key
-    let mut sha256_hasher = Sha256::new();
-    sha256_hasher.update(serialized_pub_key);
-    let sha256_result = sha256_hasher.finalize();
-    
-    // RIPEMD-160 hash of the SHA-256 hash
-    let mut ripemd_hasher = Ripemd160::new();
-    ripemd_hasher.update(sha256_result);
-    let ripemd_result = ripemd_hasher.finalize();
-    
-    // Add version byte (0x00 for Mainnet P2PKH)
-    let mut address_bytes = vec![0x00];
-    address_bytes.extend_from_slice(&ripemd_result);
-    
-    // Double SHA-256 for checksum
-    let mut checksum_hasher1 = Sha256::new();
-    checksum_hasher1.update(&address_bytes);
-    let checksum_result1 = checksum_hasher1.finalize();
-    
-    let mut checksum_hasher2 = Sha256::new();
-    checksum_hasher2.update(checksum_result1);
-    let checksum_result2 = checksum_hasher2.finalize();
-    
-    // Add first 4 bytes of the checksum
-    address_bytes.extend_from_slice(&checksum_result2[0..4]);
-    
-    // Base58 encode
-    bs58::encode(address_bytes).into_string()
+
+    match blockchain_type {
+        BlockchainType::BitcoinP2PKH => {
+            // P2PKH address generation (traditional address starting with "1")
+
+            // SHA-256 hash
+            let mut sha256_hasher = Sha256::new();
+            sha256_hasher.update(serialized_pub_key);
+            let sha256_result = sha256_hasher.finalize();
+
+            // RIPEMD-160 hash
+            let mut ripemd_hasher = Ripemd160::new();
+            ripemd_hasher.update(sha256_result);
+            let ripemd_result = ripemd_hasher.finalize();
+
+            // Add version byte (0x00 for mainnet P2PKH)
+            let mut address_bytes = vec![0x00];
+            address_bytes.extend_from_slice(&ripemd_result);
+
+            // Double SHA-256 checksum calculation
+            let mut checksum_hasher1 = Sha256::new();
+            checksum_hasher1.update(&address_bytes);
+            let checksum_result1 = checksum_hasher1.finalize();
+
+            let mut checksum_hasher2 = Sha256::new();
+            checksum_hasher2.update(checksum_result1);
+            let checksum_result2 = checksum_hasher2.finalize();
+
+            // Add checksum's first 4 bytes
+            address_bytes.extend_from_slice(&checksum_result2[0..4]);
+
+            // Base58 encoding
+            bs58::encode(address_bytes).into_string()
+        }
+        BlockchainType::BitcoinP2SH => {
+            // P2SH address generation (starting with "3")
+
+            // SHA-256 hash
+            let mut sha256_hasher = Sha256::new();
+            sha256_hasher.update(serialized_pub_key);
+            let sha256_result = sha256_hasher.finalize();
+
+            // RIPEMD-160 hash
+            let mut ripemd_hasher = Ripemd160::new();
+            ripemd_hasher.update(sha256_result);
+            let ripemd_result = ripemd_hasher.finalize();
+
+            // Create the raw redeem script - OP_0 <pubKeyHash>
+            let mut redeem_script = vec![0x00, 0x14];
+            redeem_script.extend_from_slice(&ripemd_result);
+            let mut redeem_script = vec![0x00, 0x14];
+            redeem_script.extend_from_slice(&ripemd_result);
+
+            // Calculate the hash of the redeem script
+            // SHA-256
+            let mut script_hasher = Sha256::new();
+            script_hasher.update(&redeem_script);
+            let script_sha256 = script_hasher.finalize();
+
+            // RIPEMD-160
+            let mut script_ripemd = Ripemd160::new();
+            script_ripemd.update(script_sha256);
+            let script_hash = script_ripemd.finalize();
+
+            // Add version byte (0x05 for mainnet P2SH) 
+            let mut address_bytes = vec![0x05];
+            address_bytes.extend_from_slice(&script_hash);
+
+            // Double SHA-256 checksum calculation
+            let mut checksum_hasher1 = Sha256::new();
+            checksum_hasher1.update(&address_bytes);
+            let checksum_result1 = checksum_hasher1.finalize();
+
+            let mut checksum_hasher2 = Sha256::new();
+            checksum_hasher2.update(checksum_result1);
+            let checksum_result2 = checksum_hasher2.finalize();
+
+            // Add checksum's first 4 bytes
+            address_bytes.extend_from_slice(&checksum_result2[0..4]);
+
+            // Base58 encoding
+            bs58::encode(address_bytes).into_string()
+        }
+        BlockchainType::BitcoinBech32 => {
+            // Bech32 address generation (starting with "bc1")
+
+            // SHA-256 hash
+            let mut sha256_hasher = Sha256::new();
+            sha256_hasher.update(serialized_pub_key);
+            let sha256_result = sha256_hasher.finalize();
+
+            // RIPEMD-160 hash
+            let mut ripemd_hasher = Ripemd160::new();
+            ripemd_hasher.update(sha256_result);
+            let ripemd_result = ripemd_hasher.finalize();
+
+            // Bech32 address generation (starting with "bc1")
+            let bech32_address =
+                bech32::encode("bc", ripemd_result.to_base32(), Variant::Bech32).unwrap();
+            bech32_address
+        }
+        _ => {
+            // Default to P2PKH format
+            let mut sha256_hasher = Sha256::new();
+            sha256_hasher.update(serialized_pub_key);
+            let sha256_result = sha256_hasher.finalize();
+
+            let mut ripemd_hasher = Ripemd160::new();
+            ripemd_hasher.update(sha256_result);
+            let ripemd_result = ripemd_hasher.finalize();
+
+            let mut address_bytes = vec![0x00];
+            address_bytes.extend_from_slice(&ripemd_result);
+
+            let mut checksum_hasher1 = Sha256::new();
+            checksum_hasher1.update(&address_bytes);
+            let checksum_result1 = checksum_hasher1.finalize();
+
+            let mut checksum_hasher2 = Sha256::new();
+            checksum_hasher2.update(checksum_result1);
+            let checksum_result2 = checksum_hasher2.finalize();
+
+            address_bytes.extend_from_slice(&checksum_result2[0..4]);
+
+            bs58::encode(address_bytes).into_string()
+        }
+    }
 }
 
 #[inline(always)]
 fn generate_solana_keypair(mnemonic: &Mnemonic) -> Keypair {
     let seed = mnemonic.to_seed("");
-    
+
     // Solana uses m/44'/501'/0'/0' derivation path
     let hdwallet = ExtendedPrivKey::derive(&seed, "m/44'/501'/0'/0'").unwrap();
     let account0 = hdwallet.child(ChildNumber::from_str("0").unwrap()).unwrap();
-    
+
     // Convert the seed to a Solana keypair
     // The seed is 64 bytes, but we need 32 bytes for the Solana secret key
     let secret = account0.secret();
-    
+
     // Create a SHA-256 hash of the seed to get a 32-byte key
     let mut hasher = Sha256::new();
     hasher.update(secret);
     let hashed_seed = hasher.finalize();
-    
+
     let secret_key_bytes: [u8; 32] = hashed_seed.as_slice().try_into().unwrap();
     let secret_key = SolanaSecretKey::from_bytes(&secret_key_bytes).unwrap();
-    
+
     // Create a keypair from the secret key
     let public_key = SolanaPublicKey::from(&secret_key);
     Keypair {
