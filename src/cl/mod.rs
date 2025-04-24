@@ -9,6 +9,9 @@ use rand::{Rng, thread_rng};
 const WORK_GROUP_SIZE: usize = 256;
 const BATCH_SIZE: usize = 1024 * 256; // Process 256K keys in parallel
 
+// Maximum length of a base58-encoded Solana address string
+const MAX_SOLANA_ADDR_LEN: usize = 45;
+
 pub fn list_platforms_and_devices() {
     let platforms = Platform::list();
     println!("Available OpenCL platforms:");
@@ -254,6 +257,275 @@ pub fn run_gpu_ethereum_miner(platform_idx: i32, regex_str: &str) -> Result<(Str
             found_private_key = hex::encode(private_key_slice);
 
             println!("Found matching address after {} batches!", batch_count);
+            println!("Address: {}", found_address);
+            
+            break;
+        }
+
+        // Print status every 10 batches
+        if batch_count % 10 == 0 {
+            println!("Processed {} batches ({} addresses)...", 
+                batch_count, batch_count * BATCH_SIZE);
+        }
+
+        // Brief pause to avoid hogging the CPU
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    Ok((found_address, found_private_key))
+}
+
+pub fn run_gpu_solana_miner(platform_idx: i32, regex_str: &str) -> Result<(String, String), String> {
+    // Load kernel source
+    let kernel_path = Path::new("src/cl/sol_kernel.cl");
+    let kernel_source = match read_to_string(&kernel_path) {
+        Ok(source) => source,
+        Err(e) => return Err(format!("Failed to read Solana kernel source: {}", e))
+    };
+
+    // Get platform and device
+    let platforms = Platform::list();
+
+    if platforms.is_empty() {
+        return Err("No OpenCL platforms available".into());
+    }
+
+    let platform_index = if platform_idx >= 0 && platform_idx < platforms.len() as i32 {
+        platform_idx as usize
+    } else {
+        0 // Default to first platform
+    };
+    
+    let platform = platforms[platform_index];
+    
+    let devices = match Device::list_all(&platform) {
+        Ok(d) => d,
+        Err(e) => return Err(format!("Failed to list devices for platform: {}", e))
+    };
+
+    if devices.is_empty() {
+        return Err("No OpenCL devices available on the selected platform".into());
+    }
+
+    let device = devices[0]; // Use the first device
+    
+    // Fix device info retrieval
+    let platform_name = platform.name().unwrap_or_else(|_| String::from("Unknown"));
+    let device_name = match device.info(DeviceInfo::Name) {
+        Ok(name) => name.to_string(),
+        Err(_) => String::from("Unknown")
+    };
+    
+    println!("Using platform: {}", platform_name);
+    println!("Using device: {}", device_name);
+
+    // Create context, queue and program
+    let context = match Context::builder()
+        .platform(platform)
+        .devices(device)
+        .build() {
+            Ok(c) => c,
+            Err(e) => return Err(format!("Failed to create OpenCL context: {}", e))
+        };
+
+    let queue = match Queue::new(&context, device, Some(CommandQueueProperties::PROFILING_ENABLE)) {
+        Ok(q) => q,
+        Err(e) => return Err(format!("Failed to create command queue: {}", e))
+    };
+
+    let program = match Program::builder()
+        .devices(device)
+        .src(kernel_source)
+        .build(&context) {
+            Ok(p) => p,
+            Err(e) => return Err(format!("Failed to build program: {}", e))
+        };
+
+    // Create buffers
+    let seeds_buffer = match Buffer::<u8>::builder()
+        .queue(queue.clone())
+        .flags(MemFlags::READ_ONLY)
+        .len(BATCH_SIZE * 32) // 32 bytes per seed
+        .build() {
+            Ok(b) => b,
+            Err(e) => return Err(format!("Failed to create seeds buffer: {}", e))
+        };
+
+    let public_keys_buffer = match Buffer::<u8>::builder()
+        .queue(queue.clone())
+        .flags(MemFlags::WRITE_ONLY)
+        .len(BATCH_SIZE * 32) // 32 bytes per Solana public key
+        .build() {
+            Ok(b) => b,
+            Err(e) => return Err(format!("Failed to create public keys buffer: {}", e))
+        };
+        
+    let addresses_buffer = match Buffer::<i8>::builder()
+        .queue(queue.clone())
+        .flags(MemFlags::WRITE_ONLY)
+        .len(BATCH_SIZE * MAX_SOLANA_ADDR_LEN) // Buffer for Base58 encoded addresses
+        .build() {
+            Ok(b) => b,
+            Err(e) => return Err(format!("Failed to create addresses buffer: {}", e))
+        };
+        
+    let address_lengths_buffer = match Buffer::<u32>::builder()
+        .queue(queue.clone())
+        .flags(MemFlags::WRITE_ONLY)
+        .len(BATCH_SIZE)
+        .build() {
+            Ok(b) => b,
+            Err(e) => return Err(format!("Failed to create address lengths buffer: {}", e))
+        };
+
+    let found_flags_buffer = match Buffer::<u32>::builder()
+        .queue(queue.clone())
+        .flags(MemFlags::WRITE_ONLY)
+        .len(BATCH_SIZE)
+        .build() {
+            Ok(b) => b,
+            Err(e) => return Err(format!("Failed to create found flags buffer: {}", e))
+        };
+
+    let found_indices_buffer = match Buffer::<u32>::builder()
+        .queue(queue.clone())
+        .flags(MemFlags::READ_WRITE)
+        .len(1)
+        .build() {
+            Ok(b) => b,
+            Err(e) => return Err(format!("Failed to create found indices buffer: {}", e))
+        };
+
+    // Initialize found indices to max value
+    let initial_index = vec![u32::MAX];
+    match found_indices_buffer.write(&initial_index).enq() {
+        Ok(_) => (),
+        Err(e) => return Err(format!("Failed to write to found indices buffer: {}", e))
+    }
+
+    // Create a buffer for the regex pattern
+    let regex_bytes = regex_str.as_bytes();
+    let regex_len = regex_bytes.len();
+
+    let regex_buffer = match Buffer::<u8>::builder()
+        .queue(queue.clone())
+        .flags(MemFlags::READ_ONLY)
+        .len(regex_len)
+        .copy_host_slice(regex_bytes)
+        .build() {
+            Ok(b) => b,
+            Err(e) => return Err(format!("Failed to create regex buffer: {}", e))
+        };
+
+    // Create kernel
+    let kernel = match Kernel::builder()
+        .program(&program)
+        .name("generate_sol_address")
+        .arg(&seeds_buffer)
+        .arg(&public_keys_buffer)
+        .arg(&addresses_buffer)
+        .arg(&address_lengths_buffer)
+        .arg(&found_flags_buffer)
+        .arg(&found_indices_buffer)
+        .arg(&regex_buffer)
+        .arg(regex_len as u32)
+        .arg(BATCH_SIZE as u32)
+        .build() {
+            Ok(k) => k,
+            Err(e) => return Err(format!("Failed to build kernel: {}", e))
+        };
+
+    println!("OpenCL initialization complete. Starting Solana GPU mining...");
+    println!("Looking for Solana addresses matching regex: {}", regex_str);
+
+    let mut found_address = String::new();
+    let mut found_private_key = String::new();
+    
+    let mut rng = thread_rng();
+    let mut batch_count = 0;
+    let mut seeds = vec![0u8; BATCH_SIZE * 32];
+    let mut public_keys = vec![0u8; BATCH_SIZE * 32];
+    let mut addresses = vec![0i8; BATCH_SIZE * MAX_SOLANA_ADDR_LEN];
+    let mut address_lengths = vec![0u32; BATCH_SIZE];
+    let mut found_flags = vec![0u32; BATCH_SIZE];
+    let mut found_index = vec![u32::MAX];
+
+    // Mining loop
+    loop {
+        batch_count += 1;
+        
+        // Generate random seeds
+        for chunk in seeds.chunks_mut(32) {
+            rng.fill(chunk);
+        }
+
+        // Upload seeds to GPU
+        match seeds_buffer.write(&seeds).enq() {
+            Ok(_) => (),
+            Err(e) => return Err(format!("Failed to write seeds to GPU: {}", e))
+        }
+
+        // Reset found index
+        match found_indices_buffer.write(&initial_index).enq() {
+            Ok(_) => (),
+            Err(e) => return Err(format!("Failed to reset found index: {}", e))
+        }
+
+        // Execute kernel
+        let gws = [BATCH_SIZE];
+        let lws = [WORK_GROUP_SIZE];
+        
+        unsafe {
+            match kernel.cmd()
+                .queue(&queue)
+                .global_work_size(&gws)
+                .local_work_size(&lws)
+                .enq() {
+                    Ok(_) => (),
+                    Err(e) => return Err(format!("Failed to execute kernel: {}", e))
+                }
+        }
+
+        // Read results
+        match found_indices_buffer.read(&mut found_index).enq() {
+            Ok(_) => (),
+            Err(e) => return Err(format!("Failed to read found index: {}", e))
+        }
+
+        // Check if we found a match
+        if found_index[0] != u32::MAX {
+            // Read public key and address data
+            match public_keys_buffer.read(&mut public_keys).enq() {
+                Ok(_) => (),
+                Err(e) => return Err(format!("Failed to read public keys: {}", e))
+            }
+            
+            match addresses_buffer.read(&mut addresses).enq() {
+                Ok(_) => (),
+                Err(e) => return Err(format!("Failed to read addresses: {}", e))
+            }
+            
+            match address_lengths_buffer.read(&mut address_lengths).enq() {
+                Ok(_) => (),
+                Err(e) => return Err(format!("Failed to read address lengths: {}", e))
+            }
+
+            let found_idx = found_index[0] as usize;
+            let seed_slice = &seeds[found_idx * 32..(found_idx + 1) * 32];
+            
+            // Extract the address string
+            let addr_start = found_idx * MAX_SOLANA_ADDR_LEN;
+            let addr_len = address_lengths[found_idx] as usize;
+            let addr_bytes: Vec<u8> = addresses[addr_start..(addr_start + addr_len)]
+                .iter()
+                .map(|&c| c as u8)
+                .collect();
+                
+            // Convert address and private key to string
+            found_address = String::from_utf8_lossy(&addr_bytes).to_string();
+            found_private_key = hex::encode(seed_slice);
+
+            println!("Found matching Solana address after {} batches!", batch_count);
             println!("Address: {}", found_address);
             
             break;

@@ -138,20 +138,24 @@ fn main() {
         println!("Webhook: {}", args.webhook);
     }
 
+    let blockchain_type = BlockchainType::from_str(&args.chain).unwrap_or(BlockchainType::Ethereum);
+
     // Check if running in GPU mode
     if args.gpu {
         println!("Running in GPU mode");
-        if args.chain == "eth" {
-            run_gpu_mode(&args);
-        } else {
-            eprintln!("GPU mode is currently only supported for Ethereum (eth)");
-            std::process::exit(1);
+        match blockchain_type {
+            BlockchainType::Ethereum | BlockchainType::Solana => {
+                run_gpu_mode(&args);
+                return;
+            },
+            _ => {
+                eprintln!("GPU mode is currently only supported for Ethereum (eth) and Solana (sol)");
+                std::process::exit(1);
+            }
         }
-        return;
     }
 
     // Validate that the regex matches the selected blockchain address format
-    let blockchain_type = BlockchainType::from_str(&args.chain).unwrap_or(BlockchainType::Ethereum);
     if let Err(err) = validate_regex_for_chain(&args.regex, &blockchain_type) {
         eprintln!("Error: {}", err);
         eprintln!("Please modify your regex to match the {} address format", args.chain);
@@ -203,16 +207,34 @@ fn main() {
 
 // New function for GPU mode operation
 fn run_gpu_mode(args: &Args) {
-    println!("Initializing GPU for Ethereum address generation");
+    println!("Initializing GPU for {} address generation", args.chain);
     
     // List available platforms and devices
     cl::list_platforms_and_devices();
     
-    // Run the GPU miner
+    // Run the GPU miner for the appropriate blockchain
     let platform_idx = args.gpu_platform;
     let start = Instant::now();
     
-    match cl::run_gpu_ethereum_miner(platform_idx, &args.regex) {
+    // Convert the chain string to BlockchainType for matching
+    let blockchain_type = BlockchainType::from_str(&args.chain).unwrap_or(BlockchainType::Ethereum);
+    
+    let result = match blockchain_type {
+        BlockchainType::Ethereum => {
+            println!("Running Ethereum GPU miner...");
+            cl::run_gpu_ethereum_miner(platform_idx, &args.regex)
+        },
+        BlockchainType::Solana => {
+            println!("Running Solana GPU miner...");
+            cl::run_gpu_solana_miner(platform_idx, &args.regex)
+        },
+        _ => {
+            eprintln!("GPU mining is currently only supported for Ethereum and Solana");
+            std::process::exit(1);
+        }
+    };
+    
+    match result {
         Ok((address, private_key)) => {
             let duration = start.elapsed();
             
