@@ -38,7 +38,7 @@ use tiny_keccak::{Hasher, Keccak};
 use bech32::{self, ToBase32, Variant};
 use bs58;
 use ripemd::{Digest as RipemdDigest, Ripemd160};
-use sha2::{Digest as Sha2Digest, Sha256};
+use sha2::{Sha256};
 
 // Solana related imports
 use ed25519_dalek::{Keypair, PublicKey as SolanaPublicKey, SecretKey as SolanaSecretKey};
@@ -67,7 +67,7 @@ struct Args {
     #[clap(long, default_value_t = 0)]
     gpu_platform: i32,
 
-    #[clap(short, long, default_value = "eth", value_parser = ["eth", "btc", "btc-p2pkh", "btc-p2sh", "btc-bech32", "sol"])]
+    #[clap(short, long, default_value = "eth", value_parser = ["eth", "btc", "btc-p2pkh", "btc-p2sh", "btc-bech32", "sol", "trx", "tron"])]
     chain: String,
 }
 
@@ -78,6 +78,7 @@ enum BlockchainType {
     BitcoinP2SH,   // Pay-to-Script-Hash address (3...)
     BitcoinBech32, // Segregated Witness address (bc1...)
     Solana,
+    Tron,          // Tron address (T...)
 }
 
 impl FromStr for BlockchainType {
@@ -90,6 +91,7 @@ impl FromStr for BlockchainType {
             "btc-p2sh" => Ok(BlockchainType::BitcoinP2SH),
             "btc-bech32" => Ok(BlockchainType::BitcoinBech32),
             "sol" => Ok(BlockchainType::Solana),
+            "trx" | "tron" => Ok(BlockchainType::Tron),
             _ => Err(format!("Unknown blockchain type: {}", s)),
         }
     }
@@ -144,12 +146,12 @@ fn main() {
     if args.gpu {
         println!("Running in GPU mode");
         match blockchain_type {
-            BlockchainType::Ethereum | BlockchainType::Solana => {
+            BlockchainType::Ethereum | BlockchainType::Solana | BlockchainType::Tron => {
                 run_gpu_mode(&args);
                 return;
             },
             _ => {
-                eprintln!("GPU mode is currently only supported for Ethereum (eth) and Solana (sol)");
+                eprintln!("GPU mode is currently only supported for Ethereum (eth), Solana (sol) and Tron (trx)");
                 std::process::exit(1);
             }
         }
@@ -228,8 +230,12 @@ fn run_gpu_mode(args: &Args) {
             println!("Running Solana GPU miner...");
             cl::run_gpu_solana_miner(platform_idx, &args.regex)
         },
+        BlockchainType::Tron => {
+            println!("Running Tron GPU miner...");
+            cl::run_gpu_tron_miner(platform_idx, &args.regex)
+        },
         _ => {
-            eprintln!("GPU mining is currently only supported for Ethereum and Solana");
+            eprintln!("GPU mining is currently only supported for Ethereum, Solana, and Tron");
             std::process::exit(1);
         }
     };
@@ -311,6 +317,7 @@ fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracke
                 generate_bitcoin_address(&mnemonic, &blockchain_type)
             }
             BlockchainType::Solana => generate_solana_address(&mnemonic),
+            BlockchainType::Tron => generate_tron_address(&mnemonic),
         };
 
         if re.is_match(&address) {
@@ -602,6 +609,37 @@ fn generate_solana_address(mnemonic: &Mnemonic) -> String {
     bs58::encode(&keypair.public.to_bytes()).into_string()
 }
 
+#[inline(always)]
+fn generate_tron_address(mnemonic: &Mnemonic) -> String {
+    let (_, public_key) = generate_eth_address(mnemonic);
+    
+    let mut hash_output = [0u8; 32];
+    keccak_hash(public_key, &mut hash_output);
+    
+    // Take the last 20 bytes of the keccak hash
+    let address_bytes = &hash_output[(hash_output.len() - 20)..];
+    
+    // For Tron addresses, we prefix with 0x41 (instead of Ethereum's 0x)
+    let mut tron_bytes = vec![0x41];
+    tron_bytes.extend_from_slice(address_bytes);
+    
+    // Calculate checksum (similar to Bitcoin's method)
+    // Double SHA-256 hash of the address bytes
+    let mut checksum_hasher1 = sha2::Sha256::new();
+    checksum_hasher1.update(&tron_bytes);
+    let checksum_result1 = checksum_hasher1.finalize();
+
+    let mut checksum_hasher2 = sha2::Sha256::new();
+    checksum_hasher2.update(checksum_result1);
+    let checksum_result2 = checksum_hasher2.finalize();
+
+    // Add checksum's first 4 bytes
+    tron_bytes.extend_from_slice(&checksum_result2[0..4]);
+    
+    // Base58 encode the resulting bytes to get the Tron address
+    bs58::encode(tron_bytes).into_string()
+}
+
 /// Validate if the regex pattern matches the specified blockchain address format
 fn validate_regex_for_chain(regex: &str, blockchain_type: &BlockchainType) -> Result<(), String> {
     if regex.is_empty() {
@@ -679,6 +717,41 @@ fn validate_regex_for_chain(regex: &str, blockchain_type: &BlockchainType) -> Re
                         if !c.is_whitespace() {  // Ignore whitespace
                             return Err(format!(
                                 "Invalid Solana address regex: '{}' contains character '{}', which is not in Base58 charset",
+                                regex, c
+                            ));
+                        }
+                    }
+                }
+            }
+        },
+        BlockchainType::Tron => {
+            // Tron addresses are Base58-encoded and typically start with T
+            // Base58 charset: 123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz
+            let base58_chars = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+            
+            // Check if the regex starts with T
+            if regex.starts_with("^") && !regex.starts_with("^T") && !regex.contains("|^T") {
+                return Err(format!(
+                    "Invalid Tron address regex: '{}'. Tron addresses typically start with 'T'",
+                    regex
+                ));
+            }
+            
+            for c in regex.chars() {
+                if !base58_chars.contains(c) && c != '^' && c != '$' && c != '.' && c != '*' 
+                   && c != '+' && c != '?' && c != '|' && c != '[' && c != ']' && c != '(' 
+                   && c != ')' && c != '{' && c != '}' && c != '\\' {
+                    
+                    if c == '0' || c == 'O' || c == 'I' || c == 'l' {
+                        return Err(format!(
+                            "Invalid Tron address regex: '{}' contains character '{}', which is not in Base58 charset (Note: Base58 doesn't include 0, O, I, l)",
+                            regex, c
+                        ));
+                    } else {
+                        // If not a regex special character or Base58 character, might be invalid
+                        if !c.is_whitespace() {  // Ignore whitespace
+                            return Err(format!(
+                                "Invalid Tron address regex: '{}' contains character '{}', which is not in Base58 charset",
                                 regex, c
                             ));
                         }
