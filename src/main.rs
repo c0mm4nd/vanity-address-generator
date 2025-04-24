@@ -10,6 +10,21 @@ use std::sync::{
 use std::thread;
 use std::time::Instant;
 use std::{collections::HashMap, time::Duration};
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
+use serde::{Serialize, Deserialize};
+use serde_json;
+
+#[derive(Serialize, Deserialize)]
+struct WalletInfo {
+    address: String,
+    mnemonic: String,
+    duration_seconds: u64,
+    duration_human: String,
+    timestamp: String,
+    chain_type: String,
+}
 
 use bip0039::{Count, Mnemonic};
 use libsecp256k1::{PublicKey, SecretKey};
@@ -257,7 +272,34 @@ fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracke
     }
 }
 
-fn found_result(webhook: &String, duration: Duration, mnemonic: String, address: String) {
+fn found_result(webhook: &String, duration: Duration, mnemonic: String, address: String) -> ! {
+    let args = Args::parse();
+    let chain_type = args.chain.clone();
+    
+    // Format the duration as human-readable
+    let duration_human = format!("{:?}", duration);
+    let timestamp = chrono::Local::now().to_rfc3339();
+    
+    // Create the wallet info structure
+    let wallet_info = WalletInfo {
+        address: address.clone(),
+        mnemonic: mnemonic.clone(),
+        duration_seconds: duration.as_secs(),
+        duration_human,
+        timestamp,
+        chain_type,
+    };
+    
+    // Create a filename based on the address
+    let sanitized_address = address.replace("/", "_").replace(":", "_");
+    let filename = format!("{}.json", sanitized_address);
+    
+    // Save to JSON file
+    match save_to_json(&wallet_info, &filename) {
+        Ok(_) => println!("Result saved to file: {}", filename),
+        Err(e) => eprintln!("Error saving result to file: {}", e),
+    }
+    
     // Print the result
     println!("\n");
     println!("Time: {:?}", duration);
@@ -270,8 +312,20 @@ fn found_result(webhook: &String, duration: Duration, mnemonic: String, address:
         let mut map = HashMap::new();
         map.insert("duration", duration.as_secs().to_string());
         map.insert("mnemonic", mnemonic);
-        map.insert("address", address.to_string());
+        map.insert("address", address);
+        // Note: webhook sending implementation would go here
     }
+    
+    // Exit the program after finding a match
+    std::process::exit(0);
+}
+
+/// Save the wallet information to a JSON file
+fn save_to_json(wallet_info: &WalletInfo, filename: &str) -> Result<(), std::io::Error> {
+    let json_content = serde_json::to_string_pretty(wallet_info)?;
+    let mut file = File::create(filename)?;
+    file.write_all(json_content.as_bytes())?;
+    Ok(())
 }
 
 #[inline(always)]
@@ -461,7 +515,7 @@ fn generate_solana_keypair(mnemonic: &Mnemonic) -> Keypair {
     // Convert the seed to a Solana keypair
     // The seed is 64 bytes, but we need 32 bytes for the Solana secret key
     let secret = account0.secret();
-
+    
     // Create a SHA-256 hash of the seed to get a 32-byte key
     let mut hasher = Sha256::new();
     hasher.update(secret);
