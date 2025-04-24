@@ -12,9 +12,11 @@ use std::time::Instant;
 use std::{collections::HashMap, time::Duration};
 use std::fs::File;
 use std::io::Write;
-use std::path::Path;
 use serde::{Serialize, Deserialize};
 use serde_json;
+
+// Add module declaration for our OpenCL module
+mod cl;
 
 #[derive(Serialize, Deserialize)]
 struct WalletInfo {
@@ -136,6 +138,18 @@ fn main() {
         println!("Webhook: {}", args.webhook);
     }
 
+    // Check if running in GPU mode
+    if args.gpu {
+        println!("Running in GPU mode");
+        if args.chain == "eth" {
+            run_gpu_mode(&args);
+        } else {
+            eprintln!("GPU mode is currently only supported for Ethereum (eth)");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Validate that the regex matches the selected blockchain address format
     let blockchain_type = BlockchainType::from_str(&args.chain).unwrap_or(BlockchainType::Ethereum);
     if let Err(err) = validate_regex_for_chain(&args.regex, &blockchain_type) {
@@ -185,6 +199,34 @@ fn main() {
     // This is technically unnecessary as we'll never reach this point unless
     // a vanity address is found (in which case the program would exit)
     display_handle.join().unwrap();
+}
+
+// New function for GPU mode operation
+fn run_gpu_mode(args: &Args) {
+    println!("Initializing GPU for Ethereum address generation");
+    
+    // List available platforms and devices
+    cl::list_platforms_and_devices();
+    
+    // Run the GPU miner
+    let platform_idx = args.gpu_platform;
+    let start = Instant::now();
+    
+    match cl::run_gpu_ethereum_miner(platform_idx, &args.regex) {
+        Ok((address, private_key)) => {
+            let duration = start.elapsed();
+            
+            // For GPU mode, instead of using a BIP39 mnemonic, we'll save the private key
+            let mnemonic = format!("GPU Generated - Private Key: {}", private_key);
+            
+            // Report the result
+            found_result(&args.webhook, duration, mnemonic, address);
+        },
+        Err(err) => {
+            eprintln!("Error running GPU miner: {}", err);
+            std::process::exit(1);
+        }
+    }
 }
 
 fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracker>) {
