@@ -1,5 +1,5 @@
 use crate::cl::common_gpu::{generate_random_mnemonic_keypair_batch, BATCH_SIZE, WORK_GROUP_SIZE};
-use hex;
+use hex::{self, ToHex};
 use ocl::enums::DeviceInfo;
 use ocl::flags::{CommandQueueProperties, MemFlags};
 use ocl::{Buffer, Context, Device, Kernel, Platform, Program, Queue};
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 pub fn run_gpu_ethereum_miner(
     platform_idx: i32,
     regex_str: &str,
-) -> Result<(String, String), String> {
+) -> Result<(String, String, String), String> {
     // Load kernel source
     let kernel_path = Path::new("src/cl/eth_kernel.cl");
     let kernel_source = match read_to_string(&kernel_path) {
@@ -111,7 +111,7 @@ pub fn run_gpu_ethereum_miner(
 
     // Compile the regex pattern on the CPU side
     let re = match RegexBuilder::new(regex_str)
-        .case_insensitive(false)
+        .case_insensitive(true)
         .multi_line(false)
         .dot_matches_new_line(false)
         .ignore_whitespace(true)
@@ -124,7 +124,6 @@ pub fn run_gpu_ethereum_miner(
 
     let mut batch_count = 0;
     let mut addresses = vec![0u8; BATCH_SIZE * 20];
-    let mut private_keys = vec![0u8; BATCH_SIZE * 32];
 
     // Mining loop
     loop {
@@ -174,28 +173,25 @@ pub fn run_gpu_ethereum_miner(
         // Check each address against the regex pattern on CPU
         for i in 0..BATCH_SIZE {
             let address_slice = &addresses[i * 20..(i + 1) * 20];
-            let address_hex = format!("0x{}", hex::encode(address_slice));
+            let address_hex = eip55::checksum(&format!("0x{}", hex::encode(address_slice)));
 
             // Apply the regex pattern to the formatted address
             if re.is_match(&address_hex) {
                 println!("Found a matching address after {} batches!", batch_count);
                 println!("Address: {}", address_hex);
 
-                // Read back all private keys from GPU
-                match private_keys_buffer.read(&mut private_keys).enq() {
-                    Ok(_) => (),
-                    Err(e) => return Err(format!("Failed to read private keys: {}", e)),
-                }
-
-                // Extract the matching private key
-                let private_key = &private_keys[i * 32..(i + 1) * 32];
-
                 // Generate a mnemonic for the matching key
                 println!("Generating mnemonic for the matching key...");
-                let mnemonic =
-                    keypair_batch.find_matching_mnemonic_by_private_key(private_key.to_vec());
+                let private_key = keypair_batch.mnemonic_pairs[i].private_key.clone();
+                let mnemonic = keypair_batch.find_matching_mnemonic_by_private_key(private_key.clone());
 
-                return Ok((address_hex, mnemonic));
+                return Ok((address_hex, private_key.encode_hex::<String>(), mnemonic));
+            } else {
+                println!(
+                    "No match for address {}: {}",
+                    regex_str,
+                    address_hex
+                );
             }
         }
 

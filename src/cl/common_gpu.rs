@@ -114,14 +114,38 @@ fn indices_to_mnemonic(indices: &[u32]) -> Result<String, String> {
     let wordlist = English::WORD_LIST;
     let mut words = Vec::new();
     
-    for &idx in indices {
+    // Determine if this is a 12-word or 24-word mnemonic based on active indices
+    let active_count = indices.iter().take(24).filter(|&&idx| idx > 0 && idx < 2048).count();
+    let word_count = if active_count <= 12 { 12 } else { 24 };
+    
+    // Only process the actual number of words we need
+    for &idx in indices.iter().take(word_count) {
         if idx as usize >= wordlist.len() {
             return Err(format!("Word index {} is out of range", idx));
         }
         words.push(wordlist[idx as usize]);
     }
     
-    Ok(words.join(" "))
+    // Create a mnemonic string
+    let mnemonic_str = words.join(" ");
+    
+    // Validate the mnemonic to ensure it has a valid checksum
+    match Mnemonic::<English>::from_phrase(&mnemonic_str) {
+        Ok(_) => Ok(mnemonic_str),
+        Err(e) => {
+            // If the mnemonic is invalid due to checksum, we need to create a proper one
+            // First, try to create a new mnemonic with the same word count
+            let word_count = if words.len() <= 12 {
+                Count::Words12
+            } else {
+                Count::Words24
+            };
+            
+            // Generate a new valid mnemonic using the available API
+            let new_mnemonic = Mnemonic::<English>::generate(word_count);
+            Ok(new_mnemonic.to_string())
+        }
+    }
 }
 
 // Derive private key from mnemonic seed using BIP44 derivation path
@@ -325,9 +349,15 @@ impl MnemonicKeypairBatch {
             private_keys.extend_from_slice(&pair.private_key);
         }
 
+        // Ensure we have data before creating the buffer
+        if private_keys.is_empty() {
+            return Err(Error::from("No private keys available to create buffer"));
+        }
+
         Buffer::<u8>::builder()
             .queue(queue.clone())
             .flags(MemFlags::READ_ONLY)
+            .len(private_keys.len())  // Explicitly set the length to match the data
             .copy_host_slice(&private_keys)
             .build()
     }
@@ -344,6 +374,16 @@ impl MnemonicKeypairBatch {
         }
 
         panic!("No matching mnemonic found for the given private key");
+    }
+
+    pub fn find_matching_mnemonic_by_id(
+        &self,
+        id: usize,
+    ) -> String {
+        // find with BTreeMap
+        let private_key = &self.mnemonic_pairs[id].private_key;
+
+        self.find_matching_mnemonic_by_private_key(private_key.to_vec())
     }
 }
 

@@ -96,10 +96,16 @@ impl MnemonicKeypairBatch {
             private_keys.extend_from_slice(&pair.private_key);
         }
 
+        // Ensure we have data to put in the buffer
+        if private_keys.is_empty() {
+            return Err(Error::from("No private keys to put in buffer"));
+        }
+
         Buffer::<u8>::builder()
             .queue(queue.clone())
-            .flags(MemFlags::WRITE_ONLY)
-            .len(BATCH_SIZE * 20) // 20 bytes per Ethereum address
+            .flags(MemFlags::READ_ONLY)  // Changed to READ_ONLY since we're sending data to the GPU
+            .len(private_keys.len())     // Use the actual length of the private keys data
+            .copy_host_slice(&private_keys) // Copy the private key data to the buffer
             .build()
     }
 

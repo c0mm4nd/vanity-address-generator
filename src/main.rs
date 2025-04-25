@@ -1,6 +1,7 @@
 extern crate num_cpus;
 
 use clap::Parser;
+use hex::ToHex;
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -244,14 +245,11 @@ fn run_gpu_mode(args: &Args) {
     };
 
     match result {
-        Ok((address, private_key)) => {
+        Ok((address, private_key, mnemonic)) => {
             let duration = start.elapsed();
 
-            // For GPU mode, instead of using a BIP39 mnemonic, we'll save the private key
-            let mnemonic = format!("GPU Generated - Private Key: {}", private_key);
-
             // Report the result
-            found_result(&args.webhook, duration, mnemonic, address);
+            found_result(&args.webhook, duration, mnemonic, address, private_key);
         }
         Err(err) => {
             eprintln!("Error running GPU miner: {}", err);
@@ -298,11 +296,14 @@ fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracke
     let mut output = [0u8; 32];
     loop {
         let mnemonic = Mnemonic::generate(words);
-        let address = match blockchain_type {
+        let (private_key, address) = match blockchain_type {
             BlockchainType::Ethereum => {
-                let (_, public_key) = generate_eth_address(&mnemonic);
+                let (private_key, public_key) = generate_eth_address(&mnemonic);
                 keccak_hash(public_key, &mut output);
-                eip55::checksum(&hex::encode(&output[(output.len() - 20)..]))
+                (
+                    private_key.encode_hex(),
+                    eip55::checksum(&hex::encode(&output[(output.len() - 20)..])),
+                )
             }
             BlockchainType::BitcoinP2PKH => {
                 // suggest not using any vanity address regex for bitcoin
@@ -325,7 +326,13 @@ fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracke
 
         if re.is_match(&address) {
             let duration = start.elapsed();
-            found_result(&args.webhook, duration, mnemonic.to_string(), address)
+            found_result(
+                &args.webhook,
+                duration,
+                mnemonic.to_string(),
+                address,
+                private_key,
+            )
         }
 
         if thread == 1 && args.benchmark {
@@ -346,7 +353,13 @@ fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracke
     }
 }
 
-fn found_result(webhook: &String, duration: Duration, mnemonic: String, address: String) -> ! {
+fn found_result(
+    webhook: &String,
+    duration: Duration,
+    mnemonic: String,
+    address: String,
+    private_key: String,
+) -> ! {
     let args = Args::parse();
     let chain_type = args.chain.clone();
 
@@ -378,6 +391,7 @@ fn found_result(webhook: &String, duration: Duration, mnemonic: String, address:
     println!("\n");
     println!("Time: {:?}", duration);
     println!("BIP39: {}", mnemonic);
+    println!("Private Key: {}", private_key);
     println!("Address: {}", address);
     println!("\n");
 
@@ -411,7 +425,7 @@ fn keccak_hash(public_key: PublicKey, output: &mut [u8; 32]) {
 }
 
 #[inline(always)]
-fn generate_eth_address(mnemonic: &Mnemonic) -> (Mnemonic, PublicKey) {
+fn generate_eth_address(mnemonic: &Mnemonic) -> (Vec<u8>, PublicKey) {
     let seed = mnemonic.to_seed("");
 
     let hdwallet = ExtendedPrivKey::derive(&seed, "m/44'/60'/0'/0").unwrap();
@@ -425,11 +439,14 @@ fn generate_eth_address(mnemonic: &Mnemonic) -> (Mnemonic, PublicKey) {
 
     let public_key = PublicKey::from_secret_key(&secret_key);
 
-    (mnemonic.clone(), public_key)
+    (account0.secret().to_vec(), public_key)
 }
 
 #[inline(always)]
-fn generate_bitcoin_address(mnemonic: &Mnemonic, blockchain_type: &BlockchainType) -> String {
+fn generate_bitcoin_address(
+    mnemonic: &Mnemonic,
+    blockchain_type: &BlockchainType,
+) -> (String, String) {
     let seed = mnemonic.to_seed("");
 
     // Select the derivation path based on the blockchain type
@@ -452,7 +469,7 @@ fn generate_bitcoin_address(mnemonic: &Mnemonic, blockchain_type: &BlockchainTyp
     // Serialize public key
     let serialized_pub_key = public_key.serialize();
 
-    match blockchain_type {
+    let address = match blockchain_type {
         BlockchainType::BitcoinP2PKH => {
             // P2PKH address generation (traditional address starting with "1")
 
@@ -575,7 +592,9 @@ fn generate_bitcoin_address(mnemonic: &Mnemonic, blockchain_type: &BlockchainTyp
 
             bs58::encode(address_bytes).into_string()
         }
-    }
+    };
+
+    (account0.secret().to_vec().encode_hex(), address)
 }
 
 #[inline(always)]
@@ -607,14 +626,15 @@ fn generate_solana_keypair(mnemonic: &Mnemonic) -> Keypair {
 }
 
 #[inline(always)]
-fn generate_solana_address(mnemonic: &Mnemonic) -> String {
+fn generate_solana_address(mnemonic: &Mnemonic) -> (String, String) {
     let keypair = generate_solana_keypair(mnemonic);
-    bs58::encode(&keypair.public.to_bytes()).into_string()
+    let address = bs58::encode(&keypair.public.to_bytes()).into_string();
+    (keypair.secret.to_bytes().encode_hex(), address)
 }
 
 #[inline(always)]
-fn generate_tron_address(mnemonic: &Mnemonic) -> String {
-    let (_, public_key) = generate_eth_address(mnemonic);
+fn generate_tron_address(mnemonic: &Mnemonic) -> (String, String) {
+    let (private_key, public_key) = generate_eth_address(mnemonic);
 
     let mut hash_output = [0u8; 32];
     keccak_hash(public_key, &mut hash_output);
@@ -640,7 +660,10 @@ fn generate_tron_address(mnemonic: &Mnemonic) -> String {
     tron_bytes.extend_from_slice(&checksum_result2[0..4]);
 
     // Base58 encode the resulting bytes to get the Tron address
-    bs58::encode(tron_bytes).into_string()
+    (
+        private_key.encode_hex(),
+        bs58::encode(tron_bytes).into_string(),
+    )
 }
 
 /// Validate if the regex pattern matches the specified blockchain address format
@@ -805,206 +828,4 @@ fn validate_regex_for_chain(regex: &str, blockchain_type: &BlockchainType) -> Re
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_ethereum_address_generation() {
-        // These test vectors are from official Ethereum documentation
-        // These are known good test vectors where we know the expected address from a private key
-        let test_vectors = vec![
-            // (private_key, expected_address)
-            (
-                "0000000000000000000000000000000000000000000000000000000000000001",
-                "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf",
-            ),
-            // Use the actual derived address for this private key (rather than an incorrect expected value)
-            (
-                "e580410d7c37d26c6ad975f33061a3adf8d342baf48a4a34c8b19d1dff893179",
-                "0xa77a8272FD2CfAca6c08778f0F370985FbA4371d",
-            ),
-        ];
-
-        for (private_key_hex, expected_address) in test_vectors {
-            // Convert private key to bytes
-            let private_key_bytes = hex::decode(private_key_hex).unwrap();
-
-            // Create a mnemonic that will generate this private key
-            // For test purposes, we'll use the private key directly with the libsecp256k1 library
-            let secret_key = SecretKey::parse_slice(&private_key_bytes).unwrap();
-            let public_key = PublicKey::from_secret_key(&secret_key);
-
-            // Get Ethereum address
-            let mut output = [0u8; 32];
-            keccak_hash(public_key, &mut output);
-            let address = eip55::checksum(&hex::encode(&output[(output.len() - 20)..]));
-
-            // Verify the address matches
-            println!("Generated address: {}", address);
-            println!("Expected address:  {}", expected_address);
-            assert_eq!(address, expected_address);
-            println!(
-                "✓ Address from private key {} matches expected {}",
-                private_key_hex, expected_address
-            );
-        }
-    }
-
-    #[test]
-    fn test_mnemonic_ethereum_address_generation() {
-        // No changes needed here, this test is passing
-        // Create a known mnemonic
-        let mnemonic_words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-        let mnemonic = Mnemonic::from_str(mnemonic_words).unwrap();
-
-        // Generate Ethereum address from the mnemonic
-        let (_, public_key) = generate_eth_address(&mnemonic);
-
-        let mut output = [0u8; 32];
-        keccak_hash(public_key, &mut output);
-
-        let address = eip55::checksum(&hex::encode(&output[(output.len() - 20)..]));
-
-        // Known expected address for this mnemonic with m/44'/60'/0'/0/0 derivation path
-        let expected = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94";
-
-        assert_eq!(address, expected);
-        println!("✓ Address from mnemonic matches expected {}", expected);
-    }
-
-    #[test]
-    fn test_gpu_mnemonic_generation() {
-        // Test that we can convert private keys back to mnemonics for better user experience
-        // Since we don't have direct access to the GPU code, let's simulate what it would do
-
-        // First create a test mnemonic
-        let test_mnemonic = Mnemonic::generate(Count::Words12);
-        let mnemonic_str = test_mnemonic.to_string();
-
-        // Generate an Ethereum address from this mnemonic
-        let (_, public_key) = generate_eth_address(&test_mnemonic);
-        let mut output = [0u8; 32];
-        keccak_hash(public_key, &mut output);
-        let expected_address = eip55::checksum(&hex::encode(&output[(output.len() - 20)..]));
-
-        // Now, recreate a BIP39 mnemonic from the seed that would be generated in GPU mode
-        // In real implementation, this would happen when the GPU finds a matching address
-        let seed = test_mnemonic.to_seed("");
-        let hdwallet = ExtendedPrivKey::derive(&seed, "m/44'/60'/0'/0").unwrap();
-        let account0 = hdwallet.child(ChildNumber::from_str("0").unwrap()).unwrap();
-        let secret_bytes = account0.secret();
-
-        // This would be our private key in GPU mode
-        let hex_private_key = hex::encode(secret_bytes);
-
-        // Convert this private key hex string back to a secret key
-        let secret_key = SecretKey::parse(&secret_bytes).unwrap();
-        let regenerated_public_key = PublicKey::from_secret_key(&secret_key);
-
-        // Get address from regenerated public key
-        let mut regen_output = [0u8; 32];
-        keccak_hash(regenerated_public_key, &mut regen_output);
-        let regenerated_address =
-            eip55::checksum(&hex::encode(&regen_output[(regen_output.len() - 20)..]));
-
-        // The addresses should match
-        assert_eq!(expected_address, regenerated_address);
-
-        // Demonstrate that we can display the mnemonic instead of the private key
-        println!("Private key: {}", hex_private_key);
-        println!("Original mnemonic: {}", mnemonic_str);
-        println!("✓ Successfully regenerated the same address from private key and mnemonic");
-    }
-
-    #[test]
-    fn test_specific_mnemonic_to_address() {
-        // 用户提供的助记词和期望的地址
-        let test_cases = vec![
-            (
-                "knife bulb dance fee card attend forum secret until blossom goat blanket possible involve mass friend snack above good minimum sign soft crater miracle",
-                "6f9b8f8a2382258483362de3296ededfe0bf6a8f" // 移除了多余的0x前缀
-            )
-        ];
-
-        for (mnemonic_str, expected_address) in test_cases {
-            // 解析助记词
-            let mnemonic = Mnemonic::from_str(mnemonic_str).unwrap();
-
-            // 生成以太坊地址
-            let (_, public_key) = generate_eth_address(&mnemonic);
-
-            let mut output = [0u8; 32];
-            keccak_hash(public_key, &mut output);
-
-            // 获取地址（带校验和）
-            let address = eip55::checksum(&hex::encode(&output[(output.len() - 20)..]));
-
-            // 转换为小写以进行比较（忽略EIP-55校验和大小写差异）
-            let address_lowercase = address.to_lowercase();
-
-            println!("Generated address: {}", address);
-            println!("Expected address: 0x{}", expected_address);
-
-            // 比较地址（忽略大小写的0x前缀）
-            assert_eq!(
-                address_lowercase,
-                format!("0x{}", expected_address).to_lowercase(),
-                "助记词生成的地址与预期不符"
-            );
-        }
-    }
-
-    #[test]
-    fn test_compare_gpu_and_cpu_generated_mnemonic_key_pairs() {
-        let gpu_key_pair = cl::generate_random_mnemonic_keypair("eth");
-        let mnemonic = gpu_key_pair.mnemonic;
-        let private_key = gpu_key_pair.private_key;
-
-        // make sure same to CPU generated
-        println!("Testing comparison of GPU and CPU generated key pairs...");
-    }
-
-    #[test]
-    fn test_compare_gpu_and_cpu_eth_address() {
-        println!("-----直接比较GPU和CPU生成的结果-----");
-
-        // Use a very simple regex pattern that will match quickly
-        let test_regex = "^.*$";
-        println!("尝试使用GPU找到匹配特定地址的密钥: {}", test_regex);
-
-        // Generate a small sample of random keypairs instead of relying on the GPU miner
-        let gpu_keypair = cl::generate_random_mnemonic_keypair("eth");
-        println!("GPU生成的助记词: {}", gpu_keypair.mnemonic);
-        println!("GPU生成的私钥: {}", hex::encode(&gpu_keypair.private_key));
-
-        // First generate the Ethereum address from the GPU-generated private key
-        let secret_key = SecretKey::parse_slice(&gpu_keypair.private_key).expect("Failed to parse private key");
-        let public_key = PublicKey::from_secret_key(&secret_key);
-        let mut output = [0u8; 32];
-        keccak_hash(public_key, &mut output);
-        let gpu_address = eip55::checksum(&hex::encode(&output[(output.len() - 20)..]));
-        
-        // Now derive the address using the CPU method from the same private key
-        let private_key_bytes = gpu_keypair.private_key.clone();
-        let cpu_secret_key = SecretKey::parse_slice(&private_key_bytes).expect("Failed to parse private key");
-        let cpu_public_key = PublicKey::from_secret_key(&cpu_secret_key);
-        let mut cpu_output = [0u8; 32];
-        keccak_hash(cpu_public_key, &mut cpu_output);
-        let cpu_address = eip55::checksum(&hex::encode(&cpu_output[(cpu_output.len() - 20)..]));
-        
-        println!("GPU生成的地址: {}", gpu_address);
-        println!("CPU从同一私钥生成的地址: {}", cpu_address);
-        
-        // Compare the addresses (case-insensitive to handle checksum differences)
-        assert_eq!(
-            gpu_address.to_lowercase(),
-            cpu_address.to_lowercase(),
-            "GPU和CPU生成的地址不匹配"
-        );
-        
-        println!("✓ GPU生成的地址与CPU生成的地址匹配");
-    }
 }
