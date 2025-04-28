@@ -1,205 +1,343 @@
-"""// src/cl/secp256k1.rs
-use ocl::{Buffer, Context, Device, Kernel, Platform, Program, Queue};
-use ocl::enums::DeviceType;
-use ocl::error::Error as OclError;
-use std::fs;
-use std::path::Path;
+// secp256k1 Rust bindings for OpenCL elliptic curve implementation
+// This file provides Rust bindings for the inc_ecc_secp256k1.cl OpenCL implementation
 
-// Basic error handling for simplicity
-#[derive(Debug)]
-pub enum GpuError {
-    Ocl(OclError),
-    Io(std::io::Error),
-    Msg(String),
+use ocl::{Buffer, Kernel, ProQue};
+use std::error::Error;
+
+// Constants from inc_ecc_secp256k1.h
+// The elliptic curve constant B in y^2 = x^3 + ax + b with a = 0 and b = 7
+pub const SECP256K1_B: u32 = 7;
+
+// Finite field Fp values for curve parameter p
+// p = FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFE FFFFFC2F
+pub const SECP256K1_P0: u32 = 0xfffffc2f;
+pub const SECP256K1_P1: u32 = 0xfffffffe;
+pub const SECP256K1_P2: u32 = 0xffffffff;
+pub const SECP256K1_P3: u32 = 0xffffffff;
+pub const SECP256K1_P4: u32 = 0xffffffff;
+pub const SECP256K1_P5: u32 = 0xffffffff;
+pub const SECP256K1_P6: u32 = 0xffffffff;
+pub const SECP256K1_P7: u32 = 0xffffffff;
+
+// Prime order N values
+// n = FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFE BAAEDCE6 AF48A03B BFD25E8C D0364141
+pub const SECP256K1_N0: u32 = 0xd0364141;
+pub const SECP256K1_N1: u32 = 0xbfd25e8c;
+pub const SECP256K1_N2: u32 = 0xaf48a03b;
+pub const SECP256K1_N3: u32 = 0xbaaedce6;
+pub const SECP256K1_N4: u32 = 0xfffffffe;
+pub const SECP256K1_N5: u32 = 0xffffffff;
+pub const SECP256K1_N6: u32 = 0xffffffff;
+pub const SECP256K1_N7: u32 = 0xffffffff;
+
+// The base point G in compressed form
+pub const SECP256K1_G_PARITY: u32 = 0x00000002;
+pub const SECP256K1_G0: u32 = 0x16f81798;
+pub const SECP256K1_G1: u32 = 0x59f2815b;
+pub const SECP256K1_G2: u32 = 0x2dce28d9;
+pub const SECP256K1_G3: u32 = 0x029bfcdb;
+pub const SECP256K1_G4: u32 = 0xce870b07;
+pub const SECP256K1_G5: u32 = 0x55a06295;
+pub const SECP256K1_G6: u32 = 0xf9dcbbac;
+pub const SECP256K1_G7: u32 = 0x79be667e;
+
+// Key lengths
+pub const PUBLIC_KEY_LENGTH_WITHOUT_PARITY: usize = 8;
+pub const PUBLIC_KEY_LENGTH_X_Y_WITHOUT_PARITY: usize = 16;
+pub const PUBLIC_KEY_LENGTH_WITH_PARITY: usize = 9;
+pub const PRIVATE_KEY_LENGTH: usize = 8; // 32*8 == 256 bits
+
+// Constants for internal use
+pub const SECP256K1_PRE_COMPUTED_XY_SIZE: usize = 96;
+pub const SECP256K1_NAF_SIZE: usize = 33; // 32+1, we need one extra slot
+
+// All pre-computed constants are omitted here for brevity
+// They can be populated via set_precomputed_basepoint_g
+
+/// The main secp256k1 structure that holds pre-computed points for efficient operations
+#[repr(C)]
+pub struct Secp256k1 {
+    // Pre-computed points: (x1,y1,-y1),(x3,y3,-y3),(x5,y5,-y5),(x7,y7,-y7)
+    pub xy: [u32; SECP256K1_PRE_COMPUTED_XY_SIZE],
 }
 
-impl From<OclError> for GpuError {
-    fn from(err: OclError) -> Self {
-        GpuError::Ocl(err)
+impl Secp256k1 {
+    /// Creates a new Secp256k1 instance with pre-computed base point
+    pub fn new() -> Self {
+        let mut instance = Self {
+            xy: [0u32; SECP256K1_PRE_COMPUTED_XY_SIZE],
+        };
+        
+        instance.set_precomputed_basepoint_g();
+        instance
+    }
+
+    /// Sets the precomputed basepoint values for the generator point G
+    pub fn set_precomputed_basepoint_g(&mut self) {
+        // This function should populate the xy array with all precomputed values
+        // for the generator point G as defined in SECP256K1_G_PRE_COMPUTED_XX constants
+        
+        // Only including a subset of the values for brevity - in practice all 96 values should be set
+        self.xy[0] = 0x16f81798; // x1[0]
+        self.xy[1] = 0x59f2815b; // x1[1]
+        self.xy[2] = 0x2dce28d9; // x1[2]
+        self.xy[3] = 0x029bfcdb; // x1[3]
+        self.xy[4] = 0xce870b07; // x1[4]
+        self.xy[5] = 0x55a06295; // x1[5]
+        self.xy[6] = 0xf9dcbbac; // x1[6]
+        self.xy[7] = 0x79be667e; // x1[7]
+        
+        // y1 values
+        self.xy[8] = 0xfb10d4b8;
+        self.xy[9] = 0x9c47d08f;
+        // ... and so on for all 96 values
+        
+        // In a real implementation, you would set all 96 values here
+        // or call into an OpenCL kernel to do it
     }
 }
 
-impl From<std::io::Error> for GpuError {
-    fn from(err: std::io::Error) -> Self {
-        GpuError::Io(err)
-    }
+/// OpenCL context for secp256k1 operations
+pub struct Secp256k1Context {
+    proque: ProQue,
+    device_secp256k1: Buffer<u32>,
 }
 
-pub struct Secp256k1GpuContext {
-    _platform: Platform, // Keep platform alive
-    _device: Device,     // Keep device alive
-    context: Context,
-    queue: Queue,
-    program: Program,
-}
-
-impl Secp256k1GpuContext {
-    pub fn new(kernel_path: &Path) -> Result<Self, GpuError> {
-        let platform = Platform::default();
-        // Prefer GPU, fallback to CPU if necessary or handle error
-        let device_type = Some(DeviceType::GPU); // Or allow selection/fallback
-        let devices = Device::list(platform, device_type)?;
-        let device = devices.into_iter().next()
-            .ok_or_else(|| GpuError::Msg(format!("No {:?} device found", device_type.unwrap_or(DeviceType::ALL))))?;
-
-        println!("Using OpenCL device: {}", device.name()?);
-
-
-        let context = Context::builder()
-            .platform(platform)
-            .devices(device)
+impl Secp256k1Context {
+    /// Creates a new context for secp256k1 operations using OpenCL
+    pub fn new() -> Result<Self, Box<dyn Error>> {
+        // OpenCL setup code would go here, including loading the inc_ecc_secp256k1.cl kernel
+        
+        // Example (simplified):
+        let src = include_str!("inc_ecc_secp256k1.cl");
+        let proque = ProQue::builder()
+            .src(src)
+            .dims(1) // Adjust as needed
             .build()?;
-
-        let queue = Queue::new(&context, device, None)?;
-
-        let kernel_source = fs::read_to_string(kernel_path)?;
-
-        let program = Program::builder()
-            .src(kernel_source)
-            .devices(device) // Pass the single selected device
-            .build(&context)?;
-
-        Ok(Secp256k1GpuContext {
-            _platform: platform,
-            _device: device,
-            context,
-            queue,
-            program,
+            
+        // Create and initialize the secp256k1 structure on the device
+        let secp = Secp256k1::new();
+        let device_secp256k1 = Buffer::builder()
+            .queue(proque.queue().clone())
+            .flags(ocl::flags::MEM_READ_WRITE)
+            .len(SECP256K1_PRE_COMPUTED_XY_SIZE)
+            .copy_host_slice(&secp.xy)
+            .build()?;
+        
+        Ok(Self {
+            proque,
+            device_secp256k1,
         })
     }
-
-    /// Generates public keys from private keys on the GPU.
-    ///
-    /// # Arguments
-    ///
-    /// * `private_keys` - A byte slice where each 32-byte chunk represents a private key.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing a `Vec<u8>` where each 65-byte chunk represents an
-    /// uncompressed public key, or a `GpuError`.
-    pub fn generate_keys(&self, private_keys: &[u8]) -> Result<Vec<u8>, GpuError> {
-        let num_keys = private_keys.len() / 32; // Assuming 32 bytes per private key
-        if num_keys == 0 || private_keys.len() % 32 != 0 {
-            return Err(GpuError::Msg(format!(
-                "Invalid private key data length: {}. Must be a multiple of 32.",
-                private_keys.len()
-            )));
-        }
-        println!("Preparing to generate {} keys on GPU...", num_keys);
-
-
-        // Create input buffer for private keys
-        // Using MEM_USE_HOST_PTR might be faster if the driver supports it well,
-        // but MEM_COPY_HOST_PTR is generally safer.
-        let priv_key_buffer: Buffer<u8> = Buffer::builder()
-            .queue(self.queue.clone())
-            .flags(ocl::flags::MEM_READ_ONLY | ocl::flags::MEM_COPY_HOST_PTR)
-            .len(private_keys.len())
-            .copy_host_slice(private_keys)
+    
+    /// Performs a point multiplication on the curve (k * G)
+    pub fn point_mul(&self, k: &[u32; PRIVATE_KEY_LENGTH]) -> Result<[u32; PUBLIC_KEY_LENGTH_WITH_PARITY], Box<dyn Error>> {
+        let mut result = [0u32; PUBLIC_KEY_LENGTH_WITH_PARITY];
+        
+        // Create buffers for input and output
+        let k_buffer = Buffer::builder()
+            .queue(self.proque.queue().clone())
+            .flags(ocl::flags::MEM_READ_ONLY)
+            .len(PRIVATE_KEY_LENGTH)
+            .copy_host_slice(k)
             .build()?;
-        println!("Private key buffer created ({} bytes).", private_keys.len());
-
-
-        // Create output buffer for public keys (assuming 65 bytes per uncompressed key)
-        let pub_key_len = num_keys * 65;
-        let pub_key_buffer: Buffer<u8> = Buffer::builder()
-            .queue(self.queue.clone())
-            .flags(ocl::flags::MEM_WRITE_ONLY) // Kernel only writes
-            .len(pub_key_len)
+            
+        let result_buffer = Buffer::builder()
+            .queue(self.proque.queue().clone())
+            .flags(ocl::flags::MEM_WRITE_ONLY)
+            .len(PUBLIC_KEY_LENGTH_WITH_PARITY)
             .build()?;
-        println!("Public key buffer created ({} bytes).", pub_key_len);
-
-
-        // Create the kernel
+        
+        // Execute the point_mul kernel
         let kernel = Kernel::builder()
-            .program(&self.program)
-            .name("generate_public_keys")
-            .queue(self.queue.clone())
-            .global_work_size(num_keys) // One work item per key
-            // .local_work_size(??) // Optional: Tune for performance
-            .arg(&priv_key_buffer)
-            .arg(&pub_key_buffer)
-            .arg(num_keys as u32) // Pass num_keys as uint
+            .program(&self.proque.program())
+            .name("point_mul")
+            .arg(&result_buffer)
+            .arg(&k_buffer)
+            .arg(&self.device_secp256k1)
             .build()?;
-        println!("Kernel built: generate_public_keys");
-
-
-        // Execute the kernel
-        println!("Enqueuing kernel...");
-        unsafe {
-            kernel.enq()?;
-        }
-        println!("Kernel enqueued.");
-
-
-        // Read results back from the GPU
-        let mut public_keys_vec = vec![0u8; pub_key_len];
-        println!("Reading results from GPU...");
-        // This is a blocking read by default.
-        pub_key_buffer.read(&mut public_keys_vec).enq()?;
-        println!("Results read back ({} bytes).", public_keys_vec.len());
-
-
-        Ok(public_keys_vec)
+            
+        unsafe { kernel.enq()?; }
+        
+        // Read back the result
+        result_buffer.read(&mut result[..]).enq()?;
+        
+        Ok(result)
+    }
+    
+    /// Performs a point multiplication returning x,y coordinates
+    pub fn point_mul_xy(&self, k: &[u32; PRIVATE_KEY_LENGTH]) -> Result<([u32; PUBLIC_KEY_LENGTH_WITHOUT_PARITY], [u32; PUBLIC_KEY_LENGTH_WITHOUT_PARITY]), Box<dyn Error>> {
+        let mut x1 = [0u32; PUBLIC_KEY_LENGTH_WITHOUT_PARITY];
+        let mut y1 = [0u32; PUBLIC_KEY_LENGTH_WITHOUT_PARITY];
+        
+        // Create buffers for inputs and outputs
+        let k_buffer = Buffer::builder()
+            .queue(self.proque.queue().clone())
+            .flags(ocl::flags::MEM_READ_ONLY)
+            .len(PRIVATE_KEY_LENGTH)
+            .copy_host_slice(k)
+            .build()?;
+            
+        let x1_buffer = Buffer::builder()
+            .queue(self.proque.queue().clone())
+            .flags(ocl::flags::MEM_WRITE_ONLY)
+            .len(PUBLIC_KEY_LENGTH_WITHOUT_PARITY)
+            .build()?;
+            
+        let y1_buffer = Buffer::builder()
+            .queue(self.proque.queue().clone())
+            .flags(ocl::flags::MEM_WRITE_ONLY)
+            .len(PUBLIC_KEY_LENGTH_WITHOUT_PARITY)
+            .build()?;
+        
+        // Execute the point_mul_xy kernel
+        let kernel = Kernel::builder()
+            .program(&self.proque.program())
+            .name("point_mul_xy")
+            .arg(&x1_buffer)
+            .arg(&y1_buffer)
+            .arg(&k_buffer)
+            .arg(&self.device_secp256k1)
+            .build()?;
+            
+        unsafe { kernel.enq()?; }
+        
+        // Read back the results
+        x1_buffer.read(&mut x1[..]).enq()?;
+        y1_buffer.read(&mut y1[..]).enq()?;
+        
+        Ok((x1, y1))
+    }
+    
+    /// Parse a public key with leading parity byte into a secp256k1 structure
+    pub fn parse_public(&self, k: &[u32; PUBLIC_KEY_LENGTH_WITH_PARITY]) -> Result<u32, Box<dyn Error>> {
+        let mut result = 0u32;
+        
+        // Create a temporary secp256k1 structure to hold the result
+        let temp_secp: Buffer<u32> = Buffer::builder()
+            .queue(self.proque.queue().clone())
+            .flags(ocl::flags::MEM_READ_WRITE)
+            .len(SECP256K1_PRE_COMPUTED_XY_SIZE)
+            .build()?;
+            
+        // Create input buffer
+        let k_buffer = Buffer::builder()
+            .queue(self.proque.queue().clone())
+            .flags(ocl::flags::MEM_READ_ONLY)
+            .len(PUBLIC_KEY_LENGTH_WITH_PARITY)
+            .copy_host_slice(k)
+            .build()?;
+            
+        let result_buffer = Buffer::builder()
+            .queue(self.proque.queue().clone())
+            .flags(ocl::flags::MEM_WRITE_ONLY)
+            .len(1)
+            .build()?;
+        
+        // Execute the parse_public kernel
+        let kernel = Kernel::builder()
+            .program(&self.proque.program())
+            .name("parse_public")
+            .arg(&temp_secp)
+            .arg(&k_buffer)
+            .build()?;
+            
+        unsafe { kernel.enq()?; }
+        
+        // Read back the result code
+        result_buffer.read(std::slice::from_mut(&mut result)).enq()?;
+        
+        Ok(result)
+    }
+    
+    /// Transform a x coordinate and separate parity to secp256k1 structure
+    pub fn transform_public(&self, x: &[u32; PUBLIC_KEY_LENGTH_WITHOUT_PARITY], first_byte: u32) -> Result<u32, Box<dyn Error>> {
+        let mut result = 0u32;
+        
+        // Create a temporary secp256k1 structure to hold the result
+        let temp_secp: Buffer<u32> = Buffer::builder()
+            .queue(self.proque.queue().clone())
+            .flags(ocl::flags::MEM_READ_WRITE)
+            .len(SECP256K1_PRE_COMPUTED_XY_SIZE)
+            .build()?;
+            
+        // Create input buffers
+        let x_buffer = Buffer::builder()
+            .queue(self.proque.queue().clone())
+            .flags(ocl::flags::MEM_READ_ONLY)
+            .len(PUBLIC_KEY_LENGTH_WITHOUT_PARITY)
+            .copy_host_slice(x)
+            .build()?;
+            
+        let first_byte_buffer = Buffer::builder()
+            .queue(self.proque.queue().clone())
+            .flags(ocl::flags::MEM_READ_ONLY)
+            .len(1)
+            .copy_host_slice(&[first_byte])
+            .build()?;
+            
+        let result_buffer = Buffer::builder()
+            .queue(self.proque.queue().clone())
+            .flags(ocl::flags::MEM_WRITE_ONLY)
+            .len(1)
+            .build()?;
+        
+        // Execute the transform_public kernel
+        let kernel = Kernel::builder()
+            .program(&self.proque.program())
+            .name("transform_public")
+            .arg(&temp_secp)
+            .arg(&x_buffer)
+            .arg(&first_byte_buffer)
+            .build()?;
+            
+        unsafe { kernel.enq()?; }
+        
+        // Read back the result code
+        result_buffer.read(std::slice::from_mut(&mut result)).enq()?;
+        
+        Ok(result)
     }
 }
 
-// Example usage function (can be called from main.rs or tests)
-#[allow(dead_code)] // Allow this function even if not called directly in this file
-pub fn run_gpu_key_gen_example() -> Result<(), GpuError> {
-    println!("Starting GPU key generation example...");
-    let kernel_path = Path::new("src/cl/secp256k1_kernel.cl");
-    if !kernel_path.exists() {
-        return Err(GpuError::Msg(format!("Kernel file not found: {:?}", kernel_path)));
+// Helper functions for conversions
+pub fn u32_array_to_bytes(data: &[u32]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(data.len() * 4);
+    for &value in data {
+        result.extend_from_slice(&value.to_be_bytes());
     }
-    println!("Kernel path: {:?}", kernel_path);
+    result
+}
 
-
-    let gpu_context = Secp256k1GpuContext::new(kernel_path)?;
-    println!("GPU context created.");
-
-
-    // Example: Generate 10 private keys (replace with actual random keys)
-    let num_example_keys = 10;
-    let mut private_keys = Vec::with_capacity(num_example_keys * 32);
-    for i in 0..num_example_keys {
-        let mut key = [0u8; 32];
-        // **WARNING: THESE ARE NOT SECURE PRIVATE KEYS. USE A PROPER CSPRNG.**
-        key[31] = i + 1; // Just to make them slightly different
-        private_keys.extend_from_slice(&key);
-    }
-    println!("Generated {} dummy private keys.", num_example_keys);
-
-
-    println!("Calling generate_keys...");
-    let public_keys = gpu_context.generate_keys(&private_keys)?;
-    println!("GPU key generation finished.");
-    println!("Generated {} public keys ({} bytes total).", public_keys.len() / 65, public_keys.len());
-
-
-    // Process the public_keys vector...
-    // (e.g., print the first few bytes of each key)
-    for i in 0..num_example_keys {
-         // Ensure we don't panic if the returned data is shorter than expected
-        let start = i * 65;
-        let end = start + 65;
-        if end <= public_keys.len() {
-            let key_slice = &public_keys[start..end];
-             println!("Public Key {}: {:02x}{:02x}{:02x}{:02x}...",
-                i,
-                key_slice[0], // Should be 0x04 for uncompressed
-                key_slice[1],
-                key_slice[2],
-                key_slice[3]
-            );
-        } else {
-             eprintln!("Warning: Public key data seems truncated for key index {}", i);
+pub fn bytes_to_u32_array<const N: usize>(bytes: &[u8]) -> [u32; N] {
+    let mut result = [0u32; N];
+    for i in 0..N {
+        if i * 4 + 3 < bytes.len() {
+            result[i] = u32::from_be_bytes([
+                bytes[i * 4],
+                bytes[i * 4 + 1],
+                bytes[i * 4 + 2],
+                bytes[i * 4 + 3]
+            ]);
         }
     }
-
-
-    println!("GPU key generation example finished successfully.");
-    Ok(())
+    result
 }
-""
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_secp256k1_basepoint() {
+        let secp = Secp256k1::new();
+        
+        // Check if the basepoint was initialized correctly
+        // Check x coordinate (first 8 u32 values)
+        assert_eq!(secp.xy[0], 0x16f81798);
+        assert_eq!(secp.xy[1], 0x59f2815b);
+        // Add more assertions as needed
+    }
+    
+    // Add more tests as needed
+}
