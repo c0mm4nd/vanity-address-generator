@@ -3,6 +3,7 @@ pub mod common_gpu;
 pub mod ethereum;
 pub mod solana;
 pub mod tron;
+pub mod secp256k1;
 
 use ocl::enums::DeviceInfo;
 use ocl::Platform;
