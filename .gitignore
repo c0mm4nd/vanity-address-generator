@@ -15,3 +15,6 @@ Cargo.lock
 
 # all addresses
 *.json
+
+# Mac OS X Finder files
+.DS_Store

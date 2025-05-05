@@ -14,10 +14,7 @@ use std::sync::{
 };
 use std::thread;
 use std::time::Instant;
-use std::{collections::HashMap, time::Duration}; // Add the Rng trait import here to fix the compilation error
-
-// Add module declaration for our OpenCL module
-mod cl;
+use std::{collections::HashMap, time::Duration};
 
 #[derive(Serialize, Deserialize)]
 struct WalletInfo {
@@ -215,47 +212,24 @@ fn main() {
 fn run_gpu_mode(args: &Args) {
     println!("Initializing GPU for {} address generation", args.chain);
 
-    // List available platforms and devices
-    cl::list_platforms_and_devices();
-
-    // Run the GPU miner for the appropriate blockchain
-    let platform_idx = args.gpu_platform;
-    let start = Instant::now();
-
     // Convert the chain string to BlockchainType for matching
     let blockchain_type = BlockchainType::from_str(&args.chain).unwrap_or(BlockchainType::Ethereum);
 
-    let result = match blockchain_type {
+    match blockchain_type {
         BlockchainType::Ethereum => {
-            println!("Running Ethereum GPU miner...");
-            cl::run_gpu_ethereum_miner(platform_idx, &args.regex)
+            panic!("GPU mining for Ethereum is not implemented yet");
         }
         BlockchainType::Solana => {
-            println!("Running Solana GPU miner...");
-            cl::run_gpu_solana_miner(platform_idx, &args.regex)
+            panic!("GPU mining for Solana is not implemented yet");
         }
         BlockchainType::Tron => {
-            println!("Running Tron GPU miner...");
-            cl::run_gpu_tron_miner(platform_idx, &args.regex)
+            panic!("GPU mining for Tron is not implemented yet");
         }
         _ => {
             eprintln!("GPU mining is currently only supported for Ethereum, Solana, and Tron");
             std::process::exit(1);
         }
     };
-
-    match result {
-        Ok((address, private_key, mnemonic)) => {
-            let duration = start.elapsed();
-
-            // Report the result
-            found_result(&args.webhook, duration, mnemonic, address, private_key);
-        }
-        Err(err) => {
-            eprintln!("Error running GPU miner: {}", err);
-            std::process::exit(1);
-        }
-    }
 }
 
 fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracker>) {
