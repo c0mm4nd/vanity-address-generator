@@ -5,6 +5,7 @@ mod types;
 mod utils;
 mod address;
 mod gpu;
+mod address_gpu;
 
 use args::{Args, BlockchainType};
 use types::PerformanceTracker;
@@ -138,11 +139,11 @@ fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracke
     }
 
     let re = RegexBuilder::new(args.regex.as_ref())
-        .case_insensitive(false)
+        .case_insensitive(true)
         .multi_line(false)
         .dot_matches_new_line(false)
         .ignore_whitespace(true)
-        .unicode(true)
+        .unicode(false)
         .build()
         .unwrap();
 
