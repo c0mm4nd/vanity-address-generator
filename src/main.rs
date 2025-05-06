@@ -5,7 +5,6 @@ mod types;
 mod utils;
 mod address;
 mod gpu;
-mod address_gpu;
 
 use args::{Args, BlockchainType};
 use types::PerformanceTracker;
