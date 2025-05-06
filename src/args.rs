@@ -7,6 +7,10 @@ pub struct Args {
     #[clap(short, long, default_value = "")]
     pub regex: String,
 
+    /// Case sensitivity for regex matching
+    #[clap(short, long, default_value = "true")]
+    pub case: bool,
+
     #[clap(short, long, default_value_t = 0)]
     pub words: i32,
 
