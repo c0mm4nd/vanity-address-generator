@@ -30,6 +30,7 @@ pub fn found_result(
     // Create the wallet info structure
     let wallet_info = WalletInfo {
         address: address.clone(),
+        private_key: private_key.clone(),
         mnemonic: mnemonic.clone(),
         duration_seconds: duration.as_secs(),
         duration_human,
@@ -69,7 +70,10 @@ pub fn found_result(
 }
 
 /// Validate if the regex pattern matches the specified blockchain address format
-pub fn validate_regex_for_chain(regex: &str, blockchain_type: &BlockchainType) -> Result<(), String> {
+pub fn validate_regex_for_chain(
+    regex: &str,
+    blockchain_type: &BlockchainType,
+) -> Result<(), String> {
     if regex.is_empty() {
         return Err(String::from(
             "Empty regex pattern is not allowed. Please specify a pattern to match addresses.",

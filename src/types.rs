@@ -5,6 +5,7 @@ use std::time::Instant;
 #[derive(Serialize, Deserialize)]
 pub struct WalletInfo {
     pub address: String,
+    pub private_key: String,
     pub mnemonic: String,
     pub duration_seconds: u64,
     pub duration_human: String,
