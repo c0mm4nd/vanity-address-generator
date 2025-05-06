@@ -142,7 +142,7 @@ fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracke
         .multi_line(false)
         .dot_matches_new_line(false)
         .ignore_whitespace(true)
-        .unicode(false)
+        .unicode(true)
         .build()
         .unwrap();
 
