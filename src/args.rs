@@ -7,8 +7,9 @@ pub struct Args {
     #[clap(short, long, default_value = "")]
     pub regex: String,
 
-    /// Case sensitivity for regex matching
-    #[clap(long, default_value = "true")]
+    /// Case sensitivity for regex matching, default is true
+    /// If set to false, the regex will be case insensitive
+    #[clap(long, default_value_t = true)]
     pub case: bool,
 
     #[clap(short, long, default_value_t = 0)]
