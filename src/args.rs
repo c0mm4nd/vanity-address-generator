@@ -10,7 +10,7 @@ pub struct Args {
 
     /// Case sensitivity for regex matching, default is true
     /// If set to false, the regex will be case insensitive
-    #[clap(short='C', long, default_value_t = true)]
+    #[clap(short='C', long)]
     pub case: bool,
 
     #[clap(short, long, default_value = "12", value_parser = parse_words_count)]

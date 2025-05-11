@@ -30,6 +30,8 @@ fn main() {
     println!("Matching regex: {}", args.regex);
     println!("Chain: {}", args.chain);
     println!("Mnemonic words count: {}", args.words);
+    println!("Case sensitive: {}", args.case);
+    println!("Looping: {}", args.looping);
 
     if !args.webhook.is_empty() {
         println!("Webhook: {}", args.webhook);
@@ -117,7 +119,7 @@ fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracke
     let mut op_start = Instant::now();
 
     let re = RegexBuilder::new(args.regex.as_ref())
-        .case_insensitive(args.case)
+        .case_insensitive(!args.case)
         .multi_line(false)
         .dot_matches_new_line(false)
         .ignore_whitespace(true)

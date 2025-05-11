@@ -23,6 +23,8 @@ pub fn found_result(
     private_key: String,
     chain_type: String,
 ) {
+    println!("\n\n====================================================");
+
     // Format the duration as human-readable
     let duration_human = format!("{:?}", duration);
     let timestamp = chrono::Local::now().to_rfc3339();
