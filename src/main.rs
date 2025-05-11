@@ -132,10 +132,12 @@ fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracke
             BlockchainType::Ethereum => {
                 let (private_key, public_key) = generate_eth_address(&mnemonic);
                 keccak_hash(public_key, &mut output);
-                (
-                    private_key.encode_hex(),
-                    eip55::checksum(&hex::encode(&output[(output.len() - 20)..])),
-                )
+                let generated_address = if args.case {
+                    eip55::checksum(&hex::encode(&output[(output.len() - 20)..]))
+                } else {
+                    format!("0x{}", hex::encode(&output[(output.len() - 20)..]))
+                };
+                (private_key.encode_hex(), generated_address)
             }
             BlockchainType::BitcoinP2PKH => {
                 // suggest not using any vanity address regex for bitcoin
