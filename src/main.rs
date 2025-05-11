@@ -1,22 +1,19 @@
 extern crate num_cpus;
 
+mod address;
 mod args;
+mod gpu;
 mod types;
 mod utils;
-mod address;
-mod gpu;
 
-use args::{Args, BlockchainType};
-use types::PerformanceTracker;
-use utils::{found_result, validate_regex_for_chain};
 use address::{
-    ethereum::keccak_hash,
-    generate_bitcoin_address,
-    generate_eth_address,
-    generate_solana_address,
+    ethereum::keccak_hash, generate_bitcoin_address, generate_eth_address, generate_solana_address,
     generate_tron_address,
 };
+use args::{Args, BlockchainType};
 use gpu::run_gpu_mode;
+use types::PerformanceTracker;
+use utils::{found_result, validate_regex_for_chain};
 
 use bip0039::{Count, Mnemonic};
 use clap::Parser;
@@ -122,21 +119,6 @@ fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracke
     let mut op_count: u128 = 0;
     let mut op_start = Instant::now();
 
-    // default words to 12 and 24 depends on thread
-    // allow to search in different bip39 ranges for each thread
-    let mut words = if thread % 2 == 1 {
-        Count::Words12
-    } else {
-        Count::Words24
-    };
-
-    // respect user input if specified words count in args
-    if args.words == 12 {
-        words = Count::Words12;
-    } else if args.words == 24 {
-        words = Count::Words24;
-    }
-
     let re = RegexBuilder::new(args.regex.as_ref())
         .case_insensitive(args.case)
         .multi_line(false)
@@ -148,7 +130,7 @@ fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracke
 
     let mut output = [0u8; 32];
     loop {
-        let mnemonic = Mnemonic::generate(words);
+        let mnemonic = Mnemonic::generate(args.words);
         let (private_key, address) = match blockchain_type {
             BlockchainType::Ethereum => {
                 let (private_key, public_key) = generate_eth_address(&mnemonic);

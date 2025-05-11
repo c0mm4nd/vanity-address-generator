@@ -1,4 +1,5 @@
 use clap::Parser;
+use bip0039::Count;
 use std::str::FromStr;
 
 #[derive(Parser, Debug, Clone)]
@@ -9,11 +10,11 @@ pub struct Args {
 
     /// Case sensitivity for regex matching, default is true
     /// If set to false, the regex will be case insensitive
-    #[clap(long, default_value_t = true)]
+    #[clap(short='C', long, default_value_t = true)]
     pub case: bool,
 
-    #[clap(short, long, default_value_t = 0)]
-    pub words: i32,
+    #[clap(short, long, default_value = "12", value_parser = parse_words_count)]
+    pub words: Count,
 
     #[clap(short, long, default_value_t = num_cpus::get())]
     pub threads: usize,
@@ -57,5 +58,13 @@ impl FromStr for BlockchainType {
             "trx" | "tron" => Ok(BlockchainType::Tron),
             _ => Err(format!("Unknown blockchain type: {}", s)),
         }
+    }
+}
+
+fn parse_words_count(s: &str) -> Result<Count, String> {
+    match s {
+        "12" => Ok(Count::Words12),
+        "24" => Ok(Count::Words24),
+        _ => Err(format!("Invalid word count: {}, must be 12 or 24", s)),
     }
 }
