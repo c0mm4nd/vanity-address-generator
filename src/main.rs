@@ -15,7 +15,7 @@ use gpu::run_gpu_mode;
 use types::PerformanceTracker;
 use utils::{found_result, validate_regex_for_chain};
 
-use bip0039::{Count, Mnemonic};
+use bip0039::Mnemonic;
 use clap::Parser;
 use hex::ToHex;
 use regex::RegexBuilder;
@@ -29,10 +29,7 @@ fn main() {
     println!("Threads count: {}", args.threads);
     println!("Matching regex: {}", args.regex);
     println!("Chain: {}", args.chain);
-
-    if args.words > 0 {
-        println!("Mnemonic words count: {}", args.words);
-    }
+    println!("Mnemonic words count: {}", args.words);
 
     if !args.webhook.is_empty() {
         println!("Webhook: {}", args.webhook);
@@ -168,7 +165,12 @@ fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracke
                 address,
                 private_key,
                 args.chain.clone(),
-            )
+            );
+
+            if !args.looping {
+                // Exit the program after finding a match
+                std::process::exit(0);
+            }
         }
 
         if thread == 1 && args.benchmark {

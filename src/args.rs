@@ -33,6 +33,9 @@ pub struct Args {
 
     #[clap(short, long, default_value = "eth", value_parser = ["eth", "btc", "btc-p2pkh", "btc-p2sh", "btc-bech32", "sol", "trx", "tron"])]
     pub chain: String,
+
+    #[clap(short, long, default_value_t = false)]
+    pub looping: bool,
 }
 
 #[derive(Debug, Clone)]

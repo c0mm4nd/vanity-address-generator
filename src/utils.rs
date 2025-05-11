@@ -22,7 +22,7 @@ pub fn found_result(
     address: String,
     private_key: String,
     chain_type: String,
-) -> ! {
+) {
     // Format the duration as human-readable
     let duration_human = format!("{:?}", duration);
     let timestamp = chrono::Local::now().to_rfc3339();
@@ -64,9 +64,6 @@ pub fn found_result(
         map.insert("address", address);
         // Note: webhook sending implementation would go here
     }
-
-    // Exit the program after finding a match
-    std::process::exit(0);
 }
 
 /// Validate if the regex pattern matches the specified blockchain address format
