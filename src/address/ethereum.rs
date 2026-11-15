@@ -1,9 +1,9 @@
 use bip0039::Mnemonic;
 use libsecp256k1::{PublicKey, SecretKey};
+use std::str::FromStr;
 use tiny_hderive::bip32::ExtendedPrivKey;
 use tiny_hderive::bip44::ChildNumber;
 use tiny_keccak::{Hasher, Keccak};
-use std::str::FromStr;
 
 #[inline(always)]
 pub fn keccak_hash(public_key: PublicKey, output: &mut [u8; 32]) {

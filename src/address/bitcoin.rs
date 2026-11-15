@@ -2,9 +2,9 @@ use crate::args::BlockchainType;
 use bip0039::Mnemonic;
 use hex::ToHex;
 use libsecp256k1::{PublicKey, SecretKey};
+use std::str::FromStr;
 use tiny_hderive::bip32::ExtendedPrivKey;
 use tiny_hderive::bip44::ChildNumber;
-use std::str::FromStr;
 
 // Bitcoin-specific imports
 use bech32::{self, ToBase32, Variant};
@@ -133,9 +133,7 @@ pub fn generate_bitcoin_address(
             let ripemd_result = ripemd_hasher.finalize();
 
             // Bech32 address generation (starting with "bc1")
-            let bech32_address =
-                bech32::encode("bc", ripemd_result.to_base32(), Variant::Bech32).unwrap();
-            bech32_address
+            bech32::encode("bc", ripemd_result.to_base32(), Variant::Bech32).unwrap()
         }
         _ => {
             // Default to P2PKH format

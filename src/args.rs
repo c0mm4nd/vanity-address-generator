@@ -1,5 +1,5 @@
-use clap::Parser;
 use bip0039::Count;
+use clap::{Parser, ValueEnum};
 use std::str::FromStr;
 
 #[derive(Parser, Debug, Clone)]
@@ -8,15 +8,14 @@ pub struct Args {
     #[clap(short, long, default_value = "")]
     pub regex: String,
 
-    /// Case sensitivity for regex matching, default is true
-    /// If set to false, the regex will be case insensitive
-    #[clap(short='C', long)]
+    /// Match case sensitively (Ethereum uses EIP-55 when enabled)
+    #[clap(short = 'C', long)]
     pub case: bool,
 
     #[clap(short, long, default_value = "12", value_parser = parse_words_count)]
     pub words: Count,
 
-    #[clap(short, long, default_value_t = num_cpus::get())]
+    #[clap(short, long, default_value_t = num_cpus::get(), value_parser = parse_positive)]
     pub threads: usize,
 
     #[clap(short = 'W', long, default_value = "")]
@@ -25,17 +24,42 @@ pub struct Args {
     #[clap(short, long)]
     pub benchmark: bool,
 
+    /// Benchmark duration; benchmark mode never saves wallets
+    #[clap(long, default_value_t = 10, value_parser = parse_positive)]
+    pub benchmark_seconds: usize,
+
+    /// Wallet recovery mode: BIP39 mnemonic or private key without a mnemonic
+    #[clap(long, value_enum, default_value = "mnemonic")]
+    pub mode: GenerationMode,
+
     #[clap(long)]
     pub gpu: bool,
 
     #[clap(long, default_value_t = 0)]
     pub gpu_platform: i32,
 
+    /// CUDA worker lanes (each lane checks 128 addresses per batch)
+    #[clap(long, default_value_t = 16384, value_parser = parse_positive)]
+    pub gpu_lanes: usize,
+
     #[clap(short, long, default_value = "eth", value_parser = ["eth", "btc", "btc-p2pkh", "btc-p2sh", "btc-bech32", "sol", "trx", "tron"])]
     pub chain: String,
 
     #[clap(short, long, default_value_t = false)]
     pub looping: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum GenerationMode {
+    Mnemonic,
+    PrivateKey,
+}
+
+fn parse_positive(s: &str) -> Result<usize, String> {
+    s.parse::<usize>()
+        .ok()
+        .filter(|v| *v > 0)
+        .ok_or_else(|| "must be a positive integer".to_string())
 }
 
 #[derive(Debug, Clone)]

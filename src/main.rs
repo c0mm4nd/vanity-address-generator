@@ -1,5 +1,3 @@
-extern crate num_cpus;
-
 mod address;
 mod args;
 mod gpu;
@@ -8,189 +6,177 @@ mod utils;
 
 use address::{
     ethereum::keccak_hash, generate_bitcoin_address, generate_eth_address, generate_solana_address,
-    generate_tron_address,
+    generate_tron_address, private_key,
 };
-use args::{Args, BlockchainType};
-use gpu::run_gpu_mode;
-use types::PerformanceTracker;
-use utils::{found_result, validate_regex_for_chain};
-
+use args::{Args, BlockchainType, GenerationMode};
 use bip0039::Mnemonic;
 use clap::Parser;
-use hex::ToHex;
-use regex::RegexBuilder;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use rand::RngCore;
+use regex::{Regex, RegexBuilder};
+use secp256k1::Secp256k1;
+use std::{
+    str::FromStr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+use types::PerformanceTracker;
+use utils::found_result;
 
 fn main() {
-    let args = Args::parse();
-    println!("Threads count: {}", args.threads);
-    println!("Matching regex: {}", args.regex);
-    println!("Chain: {}", args.chain);
-    println!("Mnemonic words count: {}", args.words);
-    println!("Case sensitive: {}", args.case);
-    println!("Looping: {}", args.looping);
-
-    if !args.webhook.is_empty() {
-        println!("Webhook: {}", args.webhook);
-    }
-
-    let blockchain_type = BlockchainType::from_str(&args.chain).unwrap_or(BlockchainType::Ethereum);
-
-    // Check if running in GPU mode
-    if args.gpu {
-        println!("Running in GPU mode");
-        match blockchain_type {
-            BlockchainType::Ethereum | BlockchainType::Solana | BlockchainType::Tron => {
-                run_gpu_mode(&args);
-                return;
-            }
-            _ => {
-                eprintln!("GPU mode is currently only supported for Ethereum (eth), Solana (sol) and Tron (trx)");
-                std::process::exit(1);
-            }
-        }
-    }
-
-    // Validate that the regex matches the selected blockchain address format
-    if let Err(err) = validate_regex_for_chain(&args.regex, &blockchain_type) {
-        eprintln!("Error: {}", err);
-        eprintln!(
-            "Please modify your regex to match the {} address format",
-            args.chain
-        );
+    if let Err(error) = run() {
+        eprintln!("Error: {error}");
         std::process::exit(1);
     }
-
-    println!("\n");
-
-    // Create shared performance tracker
-    let performance_tracker = Arc::new(PerformanceTracker::new());
-
-    // Clone tracker for worker threads
-    let tracker_for_workers = Arc::clone(&performance_tracker);
-
-    // Create a thread to display performance statistics
-    let display_handle = {
-        let tracker = Arc::clone(&performance_tracker);
-        thread::spawn(move || {
-            // Display hashrate every second
-            loop {
-                thread::sleep(Duration::from_secs(1));
-                let ops_per_second = tracker.get_ops_per_second();
-
-                // Clear line and move cursor to beginning
-                print!("\r\x1B[K");
-                print!("Hashrate: {:.2} addresses/s", ops_per_second);
-                std::io::Write::flush(&mut std::io::stdout()).unwrap();
-            }
-        })
-    };
-
-    let mut handles = vec![];
-
-    for i in 0..args.threads {
-        let worker_tracker = Arc::clone(&tracker_for_workers);
-        let args_clone = args.clone();
-        handles.push(thread::spawn(move || {
-            find_vanity_address(i, worker_tracker, &args_clone);
-        }));
-    }
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    // This is technically unnecessary as we'll never reach this point unless
-    // a vanity address is found (in which case the program would exit)
-    display_handle.join().unwrap();
 }
 
-fn find_vanity_address(thread: usize, performance_tracker: Arc<PerformanceTracker>, args: &Args) {
-    let blockchain_type = BlockchainType::from_str(&args.chain).unwrap_or(BlockchainType::Ethereum);
-
-    println!("Thread {} searching for {} addresses", thread, args.chain);
-
-    let start = Instant::now();
-
-    let mut op_count: u128 = 0;
-    let mut op_start = Instant::now();
-
-    let re = RegexBuilder::new(args.regex.as_ref())
+fn run() -> Result<(), String> {
+    let args = Args::parse();
+    let chain = BlockchainType::from_str(&args.chain)?;
+    if args.regex.is_empty() && !args.benchmark {
+        return Err("Specify --regex (or --benchmark)".into());
+    }
+    // Let the regex parser validate syntax: character-by-character checks reject valid
+    // ranges, escapes and Bech32 anchors, and cannot prove a regex is satisfiable.
+    let re = RegexBuilder::new(&args.regex)
         .case_insensitive(!args.case)
-        .multi_line(false)
-        .dot_matches_new_line(false)
         .ignore_whitespace(true)
-        .unicode(true)
         .build()
-        .unwrap();
-
-    let mut output = [0u8; 32];
-    loop {
-        let mnemonic = Mnemonic::generate(args.words);
-        let (private_key, address) = match blockchain_type {
-            BlockchainType::Ethereum => {
-                let (private_key, public_key) = generate_eth_address(&mnemonic);
-                keccak_hash(public_key, &mut output);
-                let generated_address = if args.case {
-                    eip55::checksum(&hex::encode(&output[(output.len() - 20)..]))
-                } else {
-                    format!("0x{}", hex::encode(&output[(output.len() - 20)..]))
-                };
-                (private_key.encode_hex(), generated_address)
-            }
-            BlockchainType::BitcoinP2PKH => {
-                // suggest not using any vanity address regex for bitcoin
-                println!("Bitcoin vanity address regex is not suggested, because it is not safe that reusing the same address");
-                generate_bitcoin_address(&mnemonic, &blockchain_type)
-            }
-            BlockchainType::BitcoinP2SH => {
-                // suggest not using any vanity address regex for bitcoin
-                println!("Bitcoin vanity address regex is not suggested, because it is not safe that reusing the same address");
-                generate_bitcoin_address(&mnemonic, &blockchain_type)
-            }
-            BlockchainType::BitcoinBech32 => {
-                // suggest not using any vanity address regex for bitcoin
-                println!("Bitcoin vanity address regex is not suggested, because it is not safe that reusing the same address");
-                generate_bitcoin_address(&mnemonic, &blockchain_type)
-            }
-            BlockchainType::Solana => generate_solana_address(&mnemonic),
-            BlockchainType::Tron => generate_tron_address(&mnemonic),
-        };
-
-        if re.is_match(&address) {
-            let duration = start.elapsed();
-            found_result(
-                &args.webhook,
-                duration,
-                mnemonic.to_string(),
-                address,
-                private_key,
-                args.chain.clone(),
+        .map_err(|e| e.to_string())?;
+    println!(
+        "Chain: {}, mode: {}, threads: {}",
+        args.chain,
+        if args.mode == GenerationMode::PrivateKey {
+            "private key"
+        } else {
+            "BIP39 mnemonic"
+        },
+        args.threads
+    );
+    if args.gpu {
+        return gpu::run_gpu_mode(&args, &re);
+    }
+    let tracker = Arc::new(PerformanceTracker::new());
+    let stop = Arc::new(AtomicBool::new(false));
+    let deadline = args
+        .benchmark
+        .then(|| Instant::now() + Duration::from_secs(args.benchmark_seconds as u64));
+    let (done_tx, done_rx) = mpsc::channel();
+    let display_tracker = tracker.clone();
+    let display = thread::spawn(move || {
+        while done_rx.recv_timeout(Duration::from_secs(1)) == Err(mpsc::RecvTimeoutError::Timeout) {
+            eprint!(
+                "\rHashrate: {:.2} addresses/s",
+                display_tracker.get_ops_per_second()
             );
+        }
+    });
+    let mut workers = Vec::new();
+    for _ in 0..args.threads {
+        let (args, chain, re, tracker, stop) = (
+            args.clone(),
+            chain.clone(),
+            re.clone(),
+            tracker.clone(),
+            stop.clone(),
+        );
+        workers.push(thread::spawn(move || {
+            search(&args, &chain, &re, &tracker, &stop, deadline)
+        }));
+    }
+    for worker in workers {
+        worker.join().map_err(|_| "Worker panicked")?;
+    }
+    let _ = done_tx.send(());
+    let _ = display.join();
+    eprintln!();
+    if args.benchmark {
+        println!(
+            "Benchmark: {} addresses in {:.3}s = {:.2} addresses/s",
+            tracker.address_counter.load(Ordering::Relaxed),
+            tracker.start_time.elapsed().as_secs_f64(),
+            tracker.get_ops_per_second()
+        );
+    }
+    Ok(())
+}
 
+fn search(
+    args: &Args,
+    chain: &BlockchainType,
+    re: &Regex,
+    tracker: &PerformanceTracker,
+    stop: &AtomicBool,
+    deadline: Option<Instant>,
+) {
+    let start = Instant::now();
+    let mut rng = rand::thread_rng();
+    let mut secp = Secp256k1::signing_only();
+    let mut blinding = [0; 32];
+    rng.fill_bytes(&mut blinding);
+    secp.seeded_randomize(&blinding);
+    let mut pending = 0;
+    loop {
+        if pending == 0
+            && (stop.load(Ordering::Relaxed) || deadline.is_some_and(|end| Instant::now() >= end))
+        {
+            break;
+        }
+        let (mnemonic, secret, legacy_secret, address) = if args.mode == GenerationMode::PrivateKey
+        {
+            let (secret, address) = private_key::generate(&mut rng, &secp, chain, args.case);
+            (None, secret, String::new(), address)
+        } else {
+            let mnemonic = Mnemonic::generate(args.words);
+            let (private, address) = match chain {
+                BlockchainType::Ethereum => {
+                    let (private, public) = generate_eth_address(&mnemonic);
+                    let mut hash = [0; 32];
+                    keccak_hash(public, &mut hash);
+                    (
+                        hex::encode(private),
+                        private_key::address_from_hash(
+                            hash[12..].try_into().unwrap(),
+                            chain,
+                            args.case,
+                        ),
+                    )
+                }
+                BlockchainType::Solana => generate_solana_address(&mnemonic),
+                BlockchainType::Tron => generate_tron_address(&mnemonic),
+                _ => generate_bitcoin_address(&mnemonic, chain),
+            };
+            (Some(mnemonic), [0; 32], private, address)
+        };
+        let matched = re.is_match(&address);
+        pending += 1;
+        if matched && !args.benchmark {
+            if args.looping || !stop.swap(true, Ordering::Relaxed) {
+                let private = if args.mode == GenerationMode::PrivateKey {
+                    private_key::encode_secret(&secret, chain)
+                } else {
+                    legacy_secret
+                };
+                found_result(
+                    &args.webhook,
+                    start.elapsed(),
+                    mnemonic.map(|m| m.to_string()).unwrap_or_default(),
+                    address,
+                    private,
+                    args.chain.clone(),
+                );
+            }
             if !args.looping {
-                // Exit the program after finding a match
-                std::process::exit(0);
+                tracker.add(pending);
+                return;
             }
         }
-
-        if thread == 1 && args.benchmark {
-            op_count += 1;
-
-            if op_count == 10000 {
-                let duration = op_start.elapsed().as_millis();
-                let per_seconds = (1000 * op_count / duration) * args.threads as u128;
-
-                println!("~{} OP/S", per_seconds);
-
-                op_count = 0;
-                op_start = Instant::now();
-            }
+        if pending == 64 {
+            tracker.add(pending);
+            pending = 0;
         }
-
-        performance_tracker.increment();
     }
 }

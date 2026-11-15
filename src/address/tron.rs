@@ -1,7 +1,7 @@
+use crate::address::ethereum::generate_eth_address;
 use bip0039::Mnemonic;
 use hex::ToHex;
 use sha2::{Digest, Sha256};
-use crate::address::ethereum::generate_eth_address;
 
 #[inline(always)]
 pub fn generate_tron_address(mnemonic: &Mnemonic) -> (String, String) {

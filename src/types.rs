@@ -27,8 +27,8 @@ impl PerformanceTracker {
         }
     }
 
-    pub fn increment(&self) {
-        self.address_counter.fetch_add(1, Ordering::Relaxed);
+    pub fn add(&self, count: usize) {
+        self.address_counter.fetch_add(count, Ordering::Relaxed);
     }
 
     pub fn get_ops_per_second(&self) -> f64 {
