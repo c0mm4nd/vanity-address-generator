@@ -120,7 +120,7 @@ checksum = "e68a5a99c65851e7be249f5cf510c0a136f18c9bca32139576d59bd3f577b043"
 dependencies = [
  "hmac 0.12.1",
  "pbkdf2",
- "rand 0.8.5",
+ "rand 0.8.6",
  "sha2 0.10.9",
  "unicode-normalization",
  "zeroize",
@@ -636,7 +636,7 @@ dependencies = [
  "libsecp256k1-core",
  "libsecp256k1-gen-ecmult",
  "libsecp256k1-gen-genmult",
- "rand 0.8.5",
+ "rand 0.8.6",
  "serde",
  "sha2 0.9.9",
  "typenum",
@@ -795,9 +795,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.8.5"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
+checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -908,7 +908,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b50c5943d326858130af85e049f2661ba3c78b26589b8ab98e65e80ae44a1252"
 dependencies = [
  "bitcoin_hashes",
- "rand 0.8.5",
+ "rand 0.8.6",
  "secp256k1-sys",
 ]
 
@@ -1138,7 +1138,7 @@ dependencies = [
  "hex",
  "libsecp256k1 0.7.2",
  "num_cpus",
- "rand 0.8.5",
+ "rand 0.8.6",
  "regex",
  "ripemd",
  "secp256k1",
